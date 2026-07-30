@@ -1,0 +1,24 @@
+# Normalise line endings in the repo, whatever Windows checks out locally.
+* text=auto eol=lf
+
+# Binaries: never diff or normalise these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp4 binary
+*.glb binary
+*.bin binary
+*.ttf binary
+*.zip binary
+
+# Git LFS is deliberately NOT used here.
+#
+# The template shipped with every image under LFS. At this repo's size (~54 MB) plain
+# git handles it fine, and LFS would cost more than it gives: the Pages workflow checks
+# out with lfs:true on every push, so each deploy would draw ~54 MB against the free
+# 1 GB/month LFS bandwidth — roughly 18 deploys before builds start failing with an
+# error that looks nothing like "you ran out of quota". Anyone cloning without git-lfs
+# installed would also get pointer files instead of images, and a confusing build failure.
+#
+# Reconsider when a single asset passes ~25 MB (a textured Philippopolis reconstruction
+# might) or the repo passes a few hundred MB.

@@ -1,0 +1,24 @@
+{
+  "imagePath": "image-targets/volcano-base_luminance.png",
+  "resources": {
+    "originalImage": "volcano-base_original.png",
+    "croppedImage": "volcano-base_cropped.png",
+    "thumbnailImage": "volcano-base_thumbnail.png",
+    "luminanceImage": "volcano-base_luminance.png"
+  },
+  "name": "volcano-base",
+  "type": "PLANAR",
+  "properties": {
+    "top": 0,
+    "left": 0,
+    "width": 1200,
+    "height": 1600,
+    "isRotated": false,
+    "originalWidth": 1200,
+    "originalHeight": 1600
+  },
+  "loadAutomatically": true,
+  "created": 1785344517683,
+  "updated": 1785344517683,
+  "metadata": null
+}

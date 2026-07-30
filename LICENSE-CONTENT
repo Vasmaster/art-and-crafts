@@ -1,0 +1,41 @@
+Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+
+Copyright 2026 Vasil Grancharov / ArtRevolt
+
+The creative work in this repository is licensed under CC BY-SA 4.0.
+
+  Human-readable summary: https://creativecommons.org/licenses/by-sa/4.0/
+  Full legal text:        https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+
+WHAT THIS COVERS
+
+  docs/                              renders and photographs
+  print/                             printable image targets
+  image-targets/volcano-base*        the target derived from them
+  src/assets/art-and-crafts-*        project imagery
+  src/volcanic-seabed/README.md      the written method
+  Future artwork: 3D models, textures, block designs, workshop materials.
+
+  In short: the artistic and educational content — the part that is the artwork and
+  the method, rather than the machinery that runs it.
+
+
+WHAT THIS DOES NOT COVER
+
+  All source code, which is MIT — see LICENSE.
+  The 8th Wall sample assets inherited with the template (src/assets/bmo-bites,
+  playing-cards, magic-photos, toggle-slam, preview.png, and their image targets),
+  which remain under 8th Wall's own terms and are not ours to relicense.
+
+
+IN PRACTICE
+
+  You may copy, remix and build on this work, including commercially, provided you
+  credit "Vasil Grancharov / ArtRevolt" and release your adaptations under the same
+  licence. That reciprocity is the point: the method is meant to keep circulating
+  among makers rather than being absorbed into something closed.
+
+  If you would rather maximise uptake and do not mind adaptations being closed,
+  plain CC BY 4.0 is the alternative — drop "-ShareAlike" and "-SA" throughout and
+  point the URLs at /licenses/by/4.0/.

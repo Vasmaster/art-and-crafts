@@ -1,0 +1,22 @@
+# Build output and dependencies. GitHub Pages builds from source, so dist/ never
+# needs committing.
+node_modules
+dist
+tmp
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
+
+# Claude Code: launch.json is shared, local permissions are not.
+.claude/settings.local.json
+
+# OS and Dropbox litter. This project lives inside a Dropbox folder, which sprays
+# these around.
+.DS_Store
+Thumbs.db
+desktop.ini
+Icon?
+.dropbox
+.dropbox.attr
+*~
