@@ -2440,7 +2440,11 @@
             "rockCount": 34,
             "seed": 7,
             "showVolume": true,
-            "hideUntilFound": true
+            "hideUntilFound": true,
+            "showWater": true,
+            "waterLevel": 0.62,
+            "waveAmplitude": 0.02,
+            "waterSegments": 48
           }
         }
       },

@@ -46,6 +46,15 @@ Options:
                        to push the effect past what the Displace strength gives
                        without going back into Blender; the component can only scale
                        it down from there
+    --albedo <path>    base colour map, wired to Base Color
+    --normal <path>    tangent-space normal map, wired through a Normal Map node.
+                       Exporting one also exports vertex tangents
+    --texture-format <AUTO|JPEG|WEBP>
+                       how maps are stored in the GLB (default JPEG). AUTO keeps each
+                       file exactly as it came in -- truthful, but a 2.4 MB PNG stays
+                       2.4 MB, and this is downloaded over a phone connection
+    --texture-quality <n>
+                       JPEG/WEBP quality, 0-100 (default 90)
     --vgroup <name>    use this vertex group as the mask instead of the radial
                        falloff. Weight 1 expands fully, 0 not at all.
                        Requires a .blend source -- see below.
@@ -123,6 +132,10 @@ DEFAULTS = {
     'shape-from': 'normals',
     'shape-modifier': 'Displace',
     'shape-gain': 1.0,
+    'albedo': '',
+    'normal': '',
+    'texture-format': 'JPEG',
+    'texture-quality': 90,
     'inner': 0.10,
     'outer': 0.42,
     'amount': 0.06,
@@ -150,7 +163,7 @@ def parse_args(argv):
         if key is None or key not in DEFAULTS:
             raise SystemExit('unknown option ' + repr(a))
         value = argv[i + 1]
-        if key == 'tris':
+        if key in ('tris', 'texture-quality'):
             args[key] = int(value)
         elif key in ('inner', 'outer', 'amount', 'shape-gain'):
             args[key] = float(value)
@@ -618,18 +631,59 @@ def add_expand_shape_key(ob, weights, amount):
         SHAPE_KEY, moved, amount))
 
 
-def add_material(ob):
-    """The sculpt arrives with no material at all; without one the exporter writes a
-    primitive with no material and three.js falls back to flat white. A plain
-    Principled BSDF gives the runtime something sane to start from, and something
-    `ecs.Material` can override if the scene wants different rock."""
+def load_image(path, label):
+    if not os.path.exists(path):
+        raise SystemExit('no such {} map: {}'.format(label, path))
+    img = bpy.data.images.load(path, check_existing=True)
+    print('[convert] {} map: {} ({} x {}, {:.2f} MB on disk)'.format(
+        label, os.path.basename(path), img.size[0], img.size[1],
+        os.path.getsize(path) / 1e6))
+    return img
+
+
+def add_material(ob, albedo_path, normal_path):
+    """Build the material the GLB ships with.
+
+    The sculpt arrives with no material at all; without one the exporter writes a
+    primitive with no material and three.js falls back to flat white. With the baked
+    maps it gets the real thing: base colour and a tangent-space normal map, wired the
+    way the glTF exporter recognises -- an Image Texture into Base Color, and a second
+    one through a Normal Map node into Normal. Anything else (a normal plugged
+    straight into Base Color, a Bump node) exports as nothing at all, silently.
+
+    The normal map must be Non-Color. It stores directions, not brightness, and
+    letting Blender apply an sRGB curve to it bends every surface the wrong way.
+    """
     mat = bpy.data.materials.new('SeabedRock')
     if mat.node_tree is None:          # `use_nodes` is on its way out in Blender 6
         mat.use_nodes = True
-    bsdf = mat.node_tree.nodes['Principled BSDF']
+    # The sculpt is a closed solid, so its back faces are never the ones you see.
+    # Blender's default is to draw them anyway, which exports as doubleSided: true and
+    # doubles the fragment work on a phone for nothing.
+    mat.use_backface_culling = True
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    bsdf = nodes['Principled BSDF']
     bsdf.inputs['Base Color'].default_value = (0.16, 0.15, 0.17, 1.0)
     bsdf.inputs['Roughness'].default_value = 0.92
     bsdf.inputs['Metallic'].default_value = 0.05
+
+    if albedo_path:
+        tex = nodes.new('ShaderNodeTexImage')
+        tex.image = load_image(albedo_path, 'albedo')
+        tex.image.colorspace_settings.name = 'sRGB'
+        tex.location = (-600, 300)
+        links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+
+    if normal_path:
+        tex = nodes.new('ShaderNodeTexImage')
+        tex.image = load_image(normal_path, 'normal')
+        tex.image.colorspace_settings.name = 'Non-Color'
+        tex.location = (-600, -100)
+        nmap = nodes.new('ShaderNodeNormalMap')
+        nmap.location = (-300, -100)
+        links.new(tex.outputs['Color'], nmap.inputs['Color'])
+        links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
+
     ob.data.materials.clear()
     ob.data.materials.append(mat)
 
@@ -647,10 +701,18 @@ def export(ob, args):
         export_yup=True,              # Blender is Z-up, glTF and three.js are Y-up
         export_apply=False,           # would strip the shape key
         export_normals=True,
+        # A normal map is meaningless without the tangent frame it was baked against.
+        # three.js can derive one in the fragment shader, but only for a mesh that has
+        # UVs, and only approximately; exporting the real tangents is a few hundred KB
+        # against normals that actually point where the bake said they did.
+        export_tangents=bool(args['normal']),
         export_morph=True,
         export_morph_normal=False,   # a 6 mm swell barely turns the normals; not worth 12 B/vert
         export_attributes=True,       # carries `_mask` through as glTF `_MASK`
         export_materials='EXPORT',
+        export_image_format=args['texture-format'],
+        export_jpeg_quality=args['texture-quality'],
+        export_image_quality=args['texture-quality'],
         export_draco_mesh_compression_enable=args['draco'],
         export_draco_mesh_compression_level=6,
         export_draco_position_quantization=14,
@@ -716,7 +778,7 @@ def main():
         add_shape_key_from_offsets(ob, modifier_offsets)
     else:
         add_expand_shape_key(ob, weights, args['amount'])
-    add_material(ob)
+    add_material(ob, args['albedo'], args['normal'])
     export(ob, args)
 
     print('[convert] done. Model is 1.0 x 1.0 x {:.4f} block units, '

@@ -16,6 +16,7 @@ resin work and the 3D work can proceed against something real.
 | --- | --- | --- |
 | Scene | `volcanic-seabed.ts` | Spawns the sculpt, lava seams, LEDs and block wireframe; drives everything from a single 0–1 heat value |
 | Model pipeline | `../../tools/convert_seabed.py` | Turns the sculpted FBX into the GLB the engine loads, and bakes the volume-expansion morph target |
+| Water | `water.ts` | The sliced water volume, its live surface, and the boil over the vent |
 | Particles | `swarm.ts` | Ash, embers, gas and marine snow |
 | Controls | `seabed-hud.ts` | Cooler / hotter buttons, temperature readout, heat bar |
 | Hardware seam | `tectonic-charge.ts` | Tap-to-charge; fires the eruption and the LED signal, optionally over WebSocket |
@@ -53,11 +54,16 @@ in order to set `ventHeight`. What it does, and why each step is there:
 | Scale to block units | The sculpt is authored 100 mm across, which is one block unit by definition. The GLB comes out 1.0 x 1.0 x 0.175 units with its origin at the centre of its base, so it needs no transform in the scene |
 | Bake the `Expand` morph target | The volume expansion, below |
 | Bake the `_MASK` attribute | The same mask, for shaders |
+| Wire up the baked maps | `--albedo` and `--normal`. The normal goes through a Normal Map node and is set Non-Color — any other wiring exports as nothing at all, silently |
 | Draco compression | The runtime ships a Draco decoder at `external/runtime/resources/draco`, so this costs nothing |
 
-The FBX stays in the repo next to the GLB, but `config/webpack.config.js` keeps
-`*.fbx` and `*.blend` out of `dist` — 19 MB of authoring format the browser will
-never ask for.
+`config/webpack.config.js` also keeps `*.fbx` and `*.blend` out of `dist`, and
+`.gitignore` keeps them out of the repo — authoring formats the browser can neither
+load nor afford to download.
+
+The GLB is 3.65 MB with the baked maps: 1.15 MB of Draco-compressed geometry and
+morph target, 1.37 MB of normal map and 1.13 MB of base colour. The maps are the
+bulk, so `--texture-quality` is the dial that matters if it needs to be smaller.
 
 ## Volume expansion on the normals
 
@@ -120,13 +126,20 @@ states. Save the .blend and let the converter derive it:
 .\tools\convert-seabed.ps1 --in "..\..\Models\TectonicSeabed.blend" --object Mesher_LOD1.002 --shape-from modifiers --vgroup VentSwell
 ```
 
-That is the command that built the GLB in the repo. Run with no `--in` at all and it
-finds the .blend by itself.
+With the baked maps, which is what built the GLB in the repo:
+
+```powershell
+.\tools\convert-seabed.ps1 --object Mesher_LOD1.002 --shape-from modifiers --vgroup VentSwell --albedo "..\..\Models\Base Color_Out.png" --normal "..\..\Models\TextureBaker_Normals_2048.jpg"
+```
+
+Run with no `--in` at all and it finds the .blend by itself. The maps land in the GLB
+as JPEG at quality 90 (`--texture-format AUTO` keeps them byte-for-byte instead, at
+the cost of a 2.4 MB PNG staying 2.4 MB over a phone connection).
 
 **The .blend is not in the repo, and that is deliberate.** The git repo is only
 `Prototype/ARTandCrafts`; the sculpt lives beside it in `Digital Culture/Models`, at
 68 MB. It is an authoring file — nothing at runtime ever opens it. What the app loads
-is `src/assets/Models/TectonicSeabed.glb`, about 1 MB, and *that* is committed, so a
+is `src/assets/Models/TectonicSeabed.glb`, a few MB, and *that* is committed, so a
 fresh clone and the Pages build have everything they need. Only the converter wants
 the .blend, and only when you are re-exporting the sculpt.
 
@@ -230,6 +243,64 @@ that is invisible; do not use it to carry anything that needs precision.
 `--amount` is the displacement in block units at weight 1, so the default 0.06 is
 6 mm of swell.
 
+## The water volume
+
+A section through a body of water rather than a blue lid on top of one: a box the
+full footprint of the block, from the seabed up to `waterLevel`, with its cut walls
+showing the column and its top face alive.
+
+### How the surface and the cut walls stay in register
+
+This is the part that looks like it needs two systems and does not. The worry is that
+the top face gets displaced by the wave function and the four cut walls do not, so
+the volume tears open along its top edge — and the fix people reach for is to run the
+same distortion over the whole volume, which is the expensive answer to a question
+that has a free one.
+
+Make the displacement a function of where a vertex is *in plan*, and nothing else:
+
+```
+y += wave(x, z) * depthMask(y)
+```
+
+A vertex at the top edge of a wall has the same `(x, z)` as the surface vertex above
+it, so it gets exactly the same offset. They match by construction rather than by
+being matched, and there is no seam to close because there was never a gap.
+`depthMask` is 1 at the waterline and cubed off with depth, so the motion dies out
+below the surface the way a real wave does and the base stays flat on the sculpt.
+
+So it is one mesh, one draw call, one shader. The wall vertices run the same code the
+surface vertices run and most of them multiply the result by nearly zero — which is
+cheaper than any scheme that keeps two meshes agreeing, and it cannot drift.
+
+### What is in the wave
+
+Three directional sines carry the swell; a drifting Voronoi F1 over the 3x3
+neighbourhood gives the cellular chop, because sines alone read as fabric rather than
+water. A second, much tighter Voronoi is the boil — weighted by `heat` and by
+proximity to the vent, so the surface is glassy when the seabed is cold and jumping
+where it is hottest. The surface normal is finite-differenced from the same function,
+three evaluations per vertex; without it the water lights like a flat sheet no matter
+how much it is moving.
+
+`waterSegments` is 48 by default, which is about 6,200 vertices for the whole volume
+including the walls. The underside is deleted at build time — it is coplanar with the
+base of the sculpt, so it would z-fight across the entire footprint and nothing can
+ever see it.
+
+### Reaching three.js
+
+`three` is not a dependency of this project and must not become one. The 8th Wall
+runtime carries its own copy and publishes it as `window.THREE`, which is what its
+own internals destructure — so that is what `water.ts` uses. A second copy from npm
+would produce objects the renderer quietly refuses to draw.
+
+That is also the answer for anything else the ECS attribute layer does not expose:
+`world.three.entityToObject.get(eid)` gives the `Object3D` behind an entity, and a
+raw mesh added to it inherits the entity's transform and its visibility — including
+being hidden with the rest of the scene when the image target is lost. It is not an
+entity, though, so nothing tears it down for you; `remove` has to dispose it.
+
 ## Swapping the model, or adding to it
 
 `useModel` and `modelUrl` are on the component. Point `modelUrl` at any GLB in
@@ -305,6 +376,13 @@ Inspector:
 - `rockCount` / `seed` — reroll the boulder field (greybox only; the sculpt is its
   own rock)
 - `showVolume` — the block wireframe
+- `showWater` — the water volume
+- `waterLevel` — the waterline in block units. The resin block is 0.7 tall, so 0.62
+  leaves a little air above the surface rather than filling to the brim
+- `waveAmplitude` — crest height in block units. 0.02 is 2 mm on a 100 mm block,
+  about as much as reads as water rather than as jelly
+- `waterSegments` — surface grid resolution. Below about 32 the Voronoi cells start
+  to alias into triangles
 - `hideUntilFound` — leave on for AR; turn **off** to see the scene on desktop,
   where there is no tracker to fire an image-found event
 

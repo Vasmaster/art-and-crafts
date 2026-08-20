@@ -2,6 +2,7 @@ import * as ecs from '@8thwall/ecs'
 
 import {CHARGE, ERUPT, LEDS, SET_TEMPERATURE, STATE} from './events'
 import {Swarm, createSwarm, updateSwarm} from './swarm'
+import {Water, createWater, disposeWater, updateWater} from './water'
 
 // Everything below is authored in "block units": 1 unit = the width of the printed
 // image target = 100 mm. The resin block described in the project plan is
@@ -91,6 +92,15 @@ interface Built {
    * it being empty for the first second or two.
    */
   expand: {meshes: any[], index: number}
+  /**
+   * The water column. Null until it is built, which may be a frame or two after the
+   * component is added — it hangs a raw three.js mesh off the entity's Object3D, and
+   * that object does not always exist yet inside `add`.
+   */
+  water: Water | null
+  waterWanted: boolean
+  waterOptions: {level: number, width: number, amplitude: number,
+    segments: number, depthSegments: number}
 }
 
 const built = new Map<ecs.Eid, Built>()
@@ -418,6 +428,10 @@ ecs.registerComponent({
     seed: ecs.ui32,
     showVolume: ecs.boolean,
     hideUntilFound: ecs.boolean,
+    showWater: ecs.boolean,
+    waterLevel: ecs.f32,
+    waveAmplitude: ecs.f32,
+    waterSegments: ecs.ui32,
   },
   schemaDefaults: {
     imageTargetName: 'volcano-base',
@@ -441,6 +455,17 @@ ecs.registerComponent({
     seed: 7,
     showVolume: true,
     hideUntilFound: true,
+    showWater: true,
+    // The waterline, in block units. The resin block is 0.7 tall, so this leaves a
+    // little air above the surface rather than filling to the brim.
+    waterLevel: 0.62,
+    // Wave height at the crest, block units. 0.02 is 2 mm on a 100 mm block, which
+    // is about as much as reads as water rather than as jelly.
+    waveAmplitude: 0.02,
+    // Grid resolution across the surface. 48 gives ~6k vertices for the whole volume,
+    // which a phone shades without noticing; below about 32 the Voronoi cells start
+    // to alias into triangles.
+    waterSegments: 48,
   },
   data: {
     temperature: ecs.f32,
@@ -460,6 +485,15 @@ ecs.registerComponent({
       pool: 0n, vent: 0n, swarms: [],
       ventY: useModel ? schema.ventHeight : SUMMIT_Y,
       expand: {meshes: [], index: -1},
+      water: null,
+      waterWanted: schema.showWater,
+      waterOptions: {
+        level: schema.waterLevel,
+        width: BLOCK_W,
+        amplitude: schema.waveAmplitude,
+        segments: schema.waterSegments,
+        depthSegments: 6,
+      },
     }
 
     // The sculpt is the whole seamount and the whole seabed floor, so when it is in
@@ -488,6 +522,9 @@ ecs.registerComponent({
     if (schema.showVolume) {
       buildVolume(world, eid, out)
     }
+    if (out.waterWanted) {
+      out.water = createWater(world, eid, out.waterOptions)
+    }
 
     built.set(eid, out)
     drift.set(eid, mulberry32(schema.seed * 977 + 13))
@@ -504,6 +541,11 @@ ecs.registerComponent({
     }
   },
   remove: (world, component) => {
+    const b = built.get(component.eid)
+    if (b?.water) {
+      // A raw three.js mesh is not an entity, so nothing tears it down for us.
+      disposeWater(b.water)
+    }
     built.delete(component.eid)
     drift.delete(component.eid)
   },
@@ -572,6 +614,15 @@ ecs.registerComponent({
     b.expand.meshes.forEach((m) => {
       m.morphTargetInfluences[b.expand.index] = influence
     })
+
+    if (b.waterWanted) {
+      if (!b.water) {
+        b.water = createWater(world, eid, b.waterOptions)
+      }
+      if (b.water) {
+        updateWater(b.water, data.elapsed, heat)
+      }
+    }
 
     const rng = drift.get(eid)
     b.swarms.forEach(s => updateSwarm(world, s, dt, heat, rng))
