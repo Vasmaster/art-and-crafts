@@ -12,6 +12,16 @@ import {Swarm, createSwarm, updateSwarm} from './swarm'
 const BLOCK_W = 1.0
 const BLOCK_H = 0.7
 
+// The sculpt. `tools/convert_seabed.py` turns TectonicSeabed.fbx into this GLB —
+// the engine has no FBX loader, `ecs.GltfModel` takes a .glb/.gltf URL and nothing
+// else. The converter scales the sculpt so its footprint is exactly one block unit
+// with its base on Y=0, which is why it needs no transform here. It also bakes an
+// "Expand" morph target: every vertex pushed along its own normal, weighted by a
+// vertex mask. See EXPAND_KEY below.
+const SEABED_MODEL = 'assets/Models/TectonicSeabed.glb'
+const EXPAND_KEY = 'Expand'
+
+// Greybox fallback, kept for `useModel: false`: a stack of cylinders, large to small.
 const SEABED_TOP = 0.05
 const TERRACES = 8
 const TERRACE_H = 0.075
@@ -67,12 +77,20 @@ const magmaColour = (t: number) => {
 
 interface Built {
   rock: ecs.Eid[]        // terraces, seabed, boulders — lit rock material
-  glow: ecs.Eid[]        // lava seams between terraces
+  glow: ecs.Eid[]        // lava seams
   leds: ecs.Eid[]        // stand-ins for the induction-powered LEDs in the resin
   volume: ecs.Eid[]      // wireframe of the physical block
   pool: ecs.Eid
   vent: ecs.Eid
   swarms: Swarm[]
+  ventY: number          // where the surface is, so the effects sit on it
+  /**
+   * The three.js meshes inside the loaded GLB that carry the Expand morph target,
+   * and the index of that target. Populated asynchronously — the model is still
+   * downloading when `add` returns — so everything that touches it has to cope with
+   * it being empty for the first second or two.
+   */
+  expand: {meshes: any[], index: number}
 }
 
 const built = new Map<ecs.Eid, Built>()
@@ -102,6 +120,55 @@ const hotMaterial = (world, eid: ecs.Eid, r: number, g: number, b: number, opaci
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
+
+/**
+ * Spawn the sculpt and latch on to its Expand morph target.
+ *
+ * `ecs.GltfModel.set` starts a download; the mesh does not exist yet when this
+ * returns. `GLTF_MODEL_LOADED` fires on the entity once it does, and hands over the
+ * raw three.js Group — which is the only way to reach `morphTargetInfluences`,
+ * since the ECS attribute layer has no morph API.
+ *
+ * Why a morph target rather than a shader: expanding along the normal is linear in
+ * its amount, `p(t) = p + n * mask * A * t`, so one shape key baked at A and lerped
+ * by t reproduces every intermediate amount exactly. One float per frame, no
+ * material patching, nothing to break when the engine swaps a material out. The
+ * converter also exports the mask as a `_MASK` vertex attribute for the cases a
+ * morph genuinely cannot cover — per-vertex noise, a travelling pulse — which need
+ * `onBeforeCompile` on the material reached through this same event.
+ */
+const buildModel = (world, root: ecs.Eid, url: string, out: Built) => {
+  const e = child(world, root, 0, 0, 0)
+  ecs.GltfModel.set(world, e, {url})
+
+  world.events.addListener(e, ecs.events.GLTF_MODEL_LOADED, (event) => {
+    const group = (event.data as any).model
+    const meshes: any[] = []
+    let index = -1
+    group.traverse((o: any) => {
+      if (!o.isMesh || !o.morphTargetInfluences || !o.morphTargetDictionary) {
+        return
+      }
+      const i = o.morphTargetDictionary[EXPAND_KEY]
+      if (i === undefined) {
+        return
+      }
+      index = i
+      meshes.push(o)
+    })
+    if (!meshes.length) {
+      console.warn(
+        `[volcanic-seabed] ${url} has no "${EXPAND_KEY}" morph target — the seabed will`,
+        'render but will not swell. Re-run tools/convert_seabed.py.'
+      )
+      return
+    }
+    out.expand = {meshes, index}
+  })
+
+  out.rock.push(e)
+  return e
+}
 
 const buildSeabed = (world, root: ecs.Eid, rng: () => number, rockCount: number, out: Built) => {
   const floor = child(world, root, 0, SEABED_TOP / 2, 0)
@@ -140,27 +207,6 @@ const buildCone = (world, root: ecs.Eid, rng: () => number, out: Built) => {
     setRotation(world, e, 'y', rng() * 360)
     rockMaterial(world, e, Math.round(mix(34, 52, rng())))
     out.rock.push(e)
-
-    // Lava seams tucked into the step above each terrace, where a real flow would
-    // pool against the next layer.
-    if (i < TERRACES - 1) {
-      const above = (TERRACES - 2 - i) / (TERRACES - 1)
-      const nextRadius = SUMMIT_R + (BASE_R - SUMMIT_R) * above ** 1.15
-      // seams sit on the step between this terrace and the next one up
-      for (let j = 0; j < 3; j++) {
-        const a = rng() * Math.PI * 2
-        const g = child(
-          world,
-          root,
-          Math.cos(a) * mix(nextRadius, radius, 0.5),
-          SEABED_TOP + (i + 1) * TERRACE_H - 0.006,
-          Math.sin(a) * mix(nextRadius, radius, 0.5)
-        )
-        ecs.SphereGeometry.set(world, g, {radius: mix(0.008, 0.016, rng())})
-        hotMaterial(world, g, 255, 96, 24, 0.85)
-        out.glow.push(g)
-      }
-    }
   }
 
   const rim = child(world, root, 0, SUMMIT_Y - 0.004, 0)
@@ -168,25 +214,59 @@ const buildCone = (world, root: ecs.Eid, rng: () => number, out: Built) => {
   setRotation(world, rim, 'x', -90)
   rockMaterial(world, rim, 38)
   out.rock.push(rim)
+}
 
-  out.pool = child(world, root, 0, SUMMIT_Y + 0.012, 0)
+/**
+ * Everything that reads as heat: the pool sitting in the vent, the jet above it, and
+ * the lava seams in the surrounding rock.
+ *
+ * Split out of `buildCone` because it has to serve both shapes, which are nothing
+ * alike: the greybox is a cone whose profile the code chose, the sculpt is a seabed
+ * relief with no summit at all. So the caller says where the vent is (`out.ventY`)
+ * and how far out the seams reach, and hands over a `surfaceY` that answers "how
+ * high is the rock this far from the centre" — for the cone that is its profile
+ * inverted, for the sculpt an approximation, since raycasting the mesh would mean
+ * waiting for it to download before any of this could be built.
+ */
+const buildVent = (
+  world,
+  root: ecs.Eid,
+  rng: () => number,
+  out: Built,
+  seamRing: number,
+  surfaceY: (d: number) => number
+) => {
+  const y = out.ventY
+
+  for (let i = 0; i < 21; i++) {
+    const a = rng() * Math.PI * 2
+    const d = mix(SUMMIT_R * 1.2, seamRing, rng() ** 0.7)
+    // Sunk a little into the rock rather than resting on it: a fissure is a crack
+    // the light comes out of, not a bead sitting on the surface.
+    const g = child(world, root, Math.cos(a) * d, surfaceY(d) - mix(0.004, 0.014, rng()), Math.sin(a) * d)
+    ecs.SphereGeometry.set(world, g, {radius: mix(0.008, 0.016, rng())})
+    hotMaterial(world, g, 255, 96, 24, 0.85)
+    out.glow.push(g)
+  }
+
+  out.pool = child(world, root, 0, y + 0.012, 0)
   ecs.SphereGeometry.set(world, out.pool, {radius: SUMMIT_R * 0.78})
   hotMaterial(world, out.pool, 255, 120, 24)
 
   // The visible jet: a taper rather than a chimney, scaled on Y by temperature so the
   // child sees the column grow as they heat the vent.
-  out.vent = child(world, root, 0, SUMMIT_Y + 0.11, 0)
+  out.vent = child(world, root, 0, y + 0.11, 0)
   ecs.ConeGeometry.set(world, out.vent, {radius: 0.055, height: 0.2})
   hotMaterial(world, out.vent, 255, 150, 40, 0.75)
 }
 
-const buildLeds = (world, root: ecs.Eid, out: Built) => {
+const buildLeds = (world, root: ecs.Eid, out: Built, y: number) => {
   // Stand-ins for the micro-LEDs cast into the resin and lit through the tabletop
   // induction coil. In AR they are what the child sees respond to a tap; the same
   // signal is what the ESP32 bridge would act on.
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * Math.PI * 2 + 0.4
-    const e = child(world, root, Math.cos(a) * 0.46, SEABED_TOP + 0.012, Math.sin(a) * 0.46)
+    const e = child(world, root, Math.cos(a) * 0.46, y + 0.012, Math.sin(a) * 0.46)
     ecs.SphereGeometry.set(world, e, {radius: 0.018})
     hotMaterial(world, e, 90, 170, 210, 0.35)
     out.leds.push(e)
@@ -218,7 +298,8 @@ const buildVolume = (world, root: ecs.Eid, out: Built) => {
   }
 }
 
-const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number) => {
+const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number, floorY: number) => {
+  const ventY = out.ventY
   const fade = (age: number, inTime = 0.15, outTime = 0.4) =>
     Math.min(1, age / inTime) * Math.min(1, (1 - age) / outTime)
 
@@ -235,7 +316,7 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number) => 
       const a = r() * Math.PI * 2
       const d = r() * 0.045
       return {
-        p: [Math.cos(a) * d, SUMMIT_Y + 0.03, Math.sin(a) * d],
+        p: [Math.cos(a) * d, ventY + 0.03, Math.sin(a) * d],
         v: [(r() - 0.5) * 0.06, 0.13 + 0.16 * heat + r() * 0.05, (r() - 0.5) * 0.06],
         span: mix(2, 3.4, r()),
       }
@@ -260,7 +341,7 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number) => 
     spawn: (r, heat) => {
       const a = r() * Math.PI * 2
       return {
-        p: [Math.cos(a) * 0.02, SUMMIT_Y + 0.02, Math.sin(a) * 0.02],
+        p: [Math.cos(a) * 0.02, ventY + 0.02, Math.sin(a) * 0.02],
         v: [
           Math.cos(a) * (0.06 + 0.14 * r()),
           0.32 + 0.5 * heat + r() * 0.12,
@@ -291,7 +372,7 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number) => 
       const a = r() * Math.PI * 2
       const d = mix(0.18, 0.5, r())
       return {
-        p: [Math.cos(a) * d, SEABED_TOP + 0.01, Math.sin(a) * d],
+        p: [Math.cos(a) * d, floorY + 0.01, Math.sin(a) * d],
         v: [0, 0.07 + r() * 0.05, 0],
         span: mix(3.5, 6.5, r()),
       }
@@ -329,6 +410,10 @@ ecs.registerComponent({
   schema: {
     imageTargetName: ecs.string,
     startTemperature: ecs.f32,
+    useModel: ecs.boolean,
+    modelUrl: ecs.string,
+    ventHeight: ecs.f32,
+    expandAtFullHeat: ecs.f32,
     rockCount: ecs.ui32,
     seed: ecs.ui32,
     showVolume: ecs.boolean,
@@ -337,6 +422,21 @@ ecs.registerComponent({
   schemaDefaults: {
     imageTargetName: 'volcano-base',
     startTemperature: 0.35,
+    useModel: true,
+    // Spelled out rather than referring to SEABED_MODEL: Studio reads schemaDefaults
+    // by parsing this file, not by running it, and it will only accept a string,
+    // number or boolean literal here. An identifier fails to load the component with
+    // "expected NumericLiteral, StringLiteral, or BooleanLiteral".
+    modelUrl: 'assets/Models/TectonicSeabed.glb',
+    // Where the sculpt's surface is above the vent. `convert_seabed.py` prints this
+    // on every export and it moves when the sculpt does, so it is a parameter rather
+    // than a constant. With a swell on, there are two answers -- 0.094 at rest and
+    // 0.143 fully expanded, on the current sculpt. Sitting between them means the jet
+    // is neither floating when cold nor swallowed when hot.
+    ventHeight: 0.115,
+    // How far the Expand morph is driven at full heat, 0..1 of the 6 mm the
+    // converter baked in. 0 turns the swell off without re-exporting anything.
+    expandAtFullHeat: 1.0,
     rockCount: 34,
     seed: 7,
     showVolume: true,
@@ -354,15 +454,37 @@ ecs.registerComponent({
     const {eid, schema, data} = component
     const rng = mulberry32(schema.seed || 1)
 
+    const useModel = schema.useModel
     const out: Built = {
       rock: [], glow: [], leds: [], volume: [],
       pool: 0n, vent: 0n, swarms: [],
+      ventY: useModel ? schema.ventHeight : SUMMIT_Y,
+      expand: {meshes: [], index: -1},
     }
 
-    buildSeabed(world, eid, rng, schema.rockCount, out)
-    buildCone(world, eid, rng, out)
-    buildLeds(world, eid, out)
-    buildParticles(world, eid, out, rng)
+    // The sculpt is the whole seamount and the whole seabed floor, so when it is in
+    // use the greybox rock — floor disc, boulder field, terrace stack, crater rim —
+    // is not built at all rather than being built and hidden. Everything else in
+    // here is an effect rather than a stand-in for the sculpt, so it survives both
+    // ways; it just has to be told how high the surface is.
+    const floorY = useModel ? schema.ventHeight * 0.75 : SEABED_TOP
+    if (useModel) {
+      buildModel(world, eid, schema.modelUrl || SEABED_MODEL, out)
+      // The sculpt is a relief, not a cone: away from the vent it stays roughly flat
+      // at about three quarters of the vent height. Good enough to bed the seams and
+      // the LEDs into, and it costs nothing.
+      buildVent(world, eid, rng, out, 0.40, d => mix(out.ventY, floorY, clamp01(d / 0.40)))
+    } else {
+      buildSeabed(world, eid, rng, schema.rockCount, out)
+      buildCone(world, eid, rng, out)
+      // Invert the terrace profile so the seams land on the cone rather than beside it.
+      buildVent(world, eid, rng, out, BASE_R, (d) => {
+        const k = clamp01((d - SUMMIT_R) / (BASE_R - SUMMIT_R)) ** (1 / 1.15)
+        return SUMMIT_Y - k * (SUMMIT_Y - SEABED_TOP)
+      })
+    }
+    buildLeds(world, eid, out, floorY)
+    buildParticles(world, eid, out, rng, floorY)
     if (schema.showVolume) {
       buildVolume(world, eid, out)
     }
@@ -386,7 +508,7 @@ ecs.registerComponent({
     drift.delete(component.eid)
   },
   tick: (world, component) => {
-    const {eid, data} = component
+    const {eid, data, schema} = component
     const b = built.get(eid)
     if (!b) {
       return
@@ -439,6 +561,16 @@ ecs.registerComponent({
         m.b = Math.round(mix(210, 255, clamp01(lit)))
         m.opacity = clamp01(0.3 + 0.7 * lit)
       })
+    })
+
+    // Volume expansion. `heat` already carries the eruption burst, so the sculpt
+    // swells as the vent is charged and relaxes as it cools — the same single value
+    // that drives every other response in here. The mesh list is empty until the GLB
+    // finishes downloading, which is why this is a forEach over a possibly empty
+    // array rather than a null check.
+    const influence = clamp01(heat * schema.expandAtFullHeat)
+    b.expand.meshes.forEach((m) => {
+      m.morphTargetInfluences[b.expand.index] = influence
     })
 
     const rng = drift.get(eid)

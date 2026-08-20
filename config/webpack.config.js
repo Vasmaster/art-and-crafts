@@ -45,6 +45,11 @@ const config = {
           from: path.join(srcPath, 'assets'),
           to: path.join(distPath, 'assets'),
           noErrorOnMissing: true,
+          // Authoring formats live next to the exports they produce — see
+          // src/assets/Models — but the runtime cannot load them and they are large.
+          // TectonicSeabed.fbx alone is 19 MB against 0.9 MB for the GLB the engine
+          // actually fetches. Keep them out of the deploy.
+          globOptions: {ignore: ['**/*.fbx', '**/*.blend', '**/*.blend1']},
         },
         {
           from: path.join(rootPath, 'image-targets'),

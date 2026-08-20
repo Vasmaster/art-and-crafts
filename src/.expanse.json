@@ -2433,6 +2433,10 @@
           "parameters": {
             "imageTargetName": "volcano-base",
             "startTemperature": 0.35,
+            "useModel": true,
+            "modelUrl": "assets/Models/TectonicSeabed.glb",
+            "ventHeight": 0.115,
+            "expandAtFullHeat": 1,
             "rockCount": 34,
             "seed": 7,
             "showVolume": true,

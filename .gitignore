@@ -20,3 +20,13 @@ Icon?
 .dropbox
 .dropbox.attr
 *~
+
+# Authoring files for the 3D work. The source of truth for the seabed is
+# TectonicSeabed.blend, which lives outside this repo in Digital Culture/Models -- it
+# is 68 MB and it is not what the app loads. `tools/convert_seabed.py` turns it into
+# src/assets/Models/TectonicSeabed.glb, ~1 MB, and that GLB *is* committed because the
+# Pages build needs it. Keeping the intermediate FBX out saves 19 MB of a file that
+# webpack already refuses to deploy.
+src/assets/**/*.fbx
+src/assets/**/*.blend
+src/assets/**/*.blend1
