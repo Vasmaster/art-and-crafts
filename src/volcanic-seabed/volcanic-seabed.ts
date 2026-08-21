@@ -3,6 +3,8 @@ import * as ecs from '@8thwall/ecs'
 import {CHARGE, ERUPT, LEDS, SET_TEMPERATURE, STATE} from './events'
 import {Swarm, createSwarm, updateSwarm} from './swarm'
 import {Water, createWater, disposeWater, updateWater} from './water'
+import {Formations, createFormations, seedMaterials, updateFormations} from './formations'
+import {TerrainField, buildTerrainField, heightAt} from './terrain'
 
 // Everything below is authored in "block units": 1 unit = the width of the printed
 // image target = 100 mm. The resin block described in the project plan is
@@ -76,15 +78,42 @@ const magmaColour = (t: number) => {
   return {r: 255, g: mix(112, 238, k), b: mix(20, 172, k)}
 }
 
+interface Seated {
+  eid: ecs.Eid
+  x: number
+  z: number
+}
+
 interface Built {
   rock: ecs.Eid[]        // terraces, seabed, boulders — lit rock material
-  glow: ecs.Eid[]        // lava seams
-  leds: ecs.Eid[]        // stand-ins for the induction-powered LEDs in the resin
+  /**
+   * Lava seams and LED stand-ins, each carrying the plan position it was built at.
+   *
+   * The position is stored rather than read back off the Object3D because the runtime
+   * keeps its transforms in the ECS store and composes `object.matrix` from them
+   * directly -- `object.position` stays at the origin no matter where an entity is,
+   * which is a quiet way to move everything to the centre of the block.
+   */
+  glow: Seated[]
+  leds: Seated[]
   volume: ecs.Eid[]      // wireframe of the physical block
   pool: ecs.Eid
-  vent: ecs.Eid
   swarms: Swarm[]
-  ventY: number          // where the surface is, so the effects sit on it
+  /**
+   * Where the vent is, in the component's local space. X and Z come from the schema;
+   * Y is re-read from the sculpt every frame, because the surface under the vent
+   * rises by most of its own height as the plate heats.
+   */
+  ventX: number
+  ventZ: number
+  ventY: number
+  /**
+   * The sampled sculpt. Null in greybox mode and until the GLB arrives; everything
+   * that reads it has to cope with that.
+   */
+  field: TerrainField | null
+  formations: Formations | null
+  seated: boolean        // have the seams and LEDs been dropped onto the real surface yet
   /**
    * The three.js meshes inside the loaded GLB that carry the Expand morph target,
    * and the index of that target. Populated asynchronously — the model is still
@@ -174,6 +203,15 @@ const buildModel = (world, root: ecs.Eid, url: string, out: Built) => {
       return
     }
     out.expand = {meshes, index}
+    // The same mesh is the only description of the terrain anyone has. Sample it now
+    // rather than making the rest of the scene guess where the surface is.
+    out.field = buildTerrainField(meshes[0])
+    if (!out.field) {
+      console.warn(
+        '[volcanic-seabed] the model has no _mask attribute, so there is no terrain',
+        'field: formations will not spawn and the vent will fall back to ventHeight.'
+      )
+    }
   })
 
   out.rock.push(e)
@@ -253,21 +291,26 @@ const buildVent = (
     const d = mix(SUMMIT_R * 1.2, seamRing, rng() ** 0.7)
     // Sunk a little into the rock rather than resting on it: a fissure is a crack
     // the light comes out of, not a bead sitting on the surface.
-    const g = child(world, root, Math.cos(a) * d, surfaceY(d) - mix(0.004, 0.014, rng()), Math.sin(a) * d)
+    const g = child(
+      world, root,
+      out.ventX + Math.cos(a) * d,
+      surfaceY(d) - mix(0.004, 0.014, rng()),
+      out.ventZ + Math.sin(a) * d
+    )
     ecs.SphereGeometry.set(world, g, {radius: mix(0.008, 0.016, rng())})
     hotMaterial(world, g, 255, 96, 24, 0.85)
-    out.glow.push(g)
+    out.glow.push({eid: g, x: out.ventX + Math.cos(a) * d, z: out.ventZ + Math.sin(a) * d})
   }
 
-  out.pool = child(world, root, 0, y + 0.012, 0)
+  out.pool = child(world, root, out.ventX, y + 0.012, out.ventZ)
   ecs.SphereGeometry.set(world, out.pool, {radius: SUMMIT_R * 0.78})
   hotMaterial(world, out.pool, 255, 120, 24)
 
-  // The visible jet: a taper rather than a chimney, scaled on Y by temperature so the
-  // child sees the column grow as they heat the vent.
-  out.vent = child(world, root, 0, y + 0.11, 0)
-  ecs.ConeGeometry.set(world, out.vent, {radius: 0.055, height: 0.2})
-  hotMaterial(world, out.vent, 255, 150, 40, 0.75)
+  // There is deliberately no jet cone here any more. It belonged to the greybox
+  // seamount, where it stood in a crater on a summit. On the sculpt there is no
+  // summit for it to stand in, so it hung in the water attached to nothing -- and the
+  // ash column already says "something is venting" without a solid object claiming
+  // to be the plume.
 }
 
 const buildLeds = (world, root: ecs.Eid, out: Built, y: number) => {
@@ -279,7 +322,7 @@ const buildLeds = (world, root: ecs.Eid, out: Built, y: number) => {
     const e = child(world, root, Math.cos(a) * 0.46, y + 0.012, Math.sin(a) * 0.46)
     ecs.SphereGeometry.set(world, e, {radius: 0.018})
     hotMaterial(world, e, 90, 170, 210, 0.35)
-    out.leds.push(e)
+    out.leds.push({eid: e, x: Math.cos(a) * 0.46, z: Math.sin(a) * 0.46})
   }
 }
 
@@ -309,7 +352,9 @@ const buildVolume = (world, root: ecs.Eid, out: Built) => {
 }
 
 const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number, floorY: number) => {
-  const ventY = out.ventY
+  // Read through `out` inside the spawn closures rather than capturing the values
+  // here: the vent moves vertically as the plate swells, and the column has to move
+  // with it or it detaches from the rock it is supposed to be coming out of.
   const fade = (age: number, inTime = 0.15, outTime = 0.4) =>
     Math.min(1, age / inTime) * Math.min(1, (1 - age) / outTime)
 
@@ -326,7 +371,7 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number, flo
       const a = r() * Math.PI * 2
       const d = r() * 0.045
       return {
-        p: [Math.cos(a) * d, ventY + 0.03, Math.sin(a) * d],
+        p: [out.ventX + Math.cos(a) * d, out.ventY + 0.03, out.ventZ + Math.sin(a) * d],
         v: [(r() - 0.5) * 0.06, 0.13 + 0.16 * heat + r() * 0.05, (r() - 0.5) * 0.06],
         span: mix(2, 3.4, r()),
       }
@@ -351,7 +396,7 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number, flo
     spawn: (r, heat) => {
       const a = r() * Math.PI * 2
       return {
-        p: [Math.cos(a) * 0.02, ventY + 0.02, Math.sin(a) * 0.02],
+        p: [out.ventX + Math.cos(a) * 0.02, out.ventY + 0.02, out.ventZ + Math.sin(a) * 0.02],
         v: [
           Math.cos(a) * (0.06 + 0.14 * r()),
           0.32 + 0.5 * heat + r() * 0.12,
@@ -411,6 +456,49 @@ const buildParticles = (world, root: ecs.Eid, out: Built, rng: () => number, flo
   }, rng))
 }
 
+/**
+ * Drop the pieces that are meant to be lying on the seabed onto the seabed.
+ *
+ * They were placed against an estimate of the surface when the component was built,
+ * because the sculpt had not downloaded yet. Once it has, the estimate can be thrown
+ * away: each one keeps its plan position and takes its height from the rock.
+ *
+ * Sampled at rest, not at the current swell — these are fixed to the plate, so they
+ * should be embedded in it when it is cold and swallowed by it as it rises. That is
+ * the seam closing up, which is the correct thing for a seam to do.
+ */
+const seatOnTerrain = (world, b: Built, rng: () => number) => {
+  if (!b.field) {
+    return
+  }
+  const seat = (s: Seated, sink: number) => {
+    world.setPosition(s.eid, s.x, heightAt(b.field, s.x, s.z, 0) - sink, s.z)
+  }
+  b.glow.forEach(g => seat(g, mix(0.004, 0.014, rng())))
+  b.leds.forEach(l => seat(l, -0.012))
+}
+
+const formationOpts = (schema) => ({
+  count: schema.formationCount,
+  minSize: schema.formationMinSize,
+  maxSize: schema.formationMaxSize,
+  crawlSpeed: schema.formationCrawl,
+  holdTime: schema.formationHold,
+})
+
+const influenceOf = (data, schema) =>
+  clamp01(clamp01(data.temperature + data.burst * 0.55) * schema.expandAtFullHeat)
+
+const seatRng = new Map<ecs.Eid, () => number>()
+const rng0 = (eid: ecs.Eid) => {
+  let r = seatRng.get(eid)
+  if (!r) {
+    r = mulberry32(Number(eid % 100000n) * 7 + 3)
+    seatRng.set(eid, r)
+  }
+  return r
+}
+
 // ---------------------------------------------------------------------------
 // Runtime response
 // ---------------------------------------------------------------------------
@@ -422,8 +510,16 @@ ecs.registerComponent({
     startTemperature: ecs.f32,
     useModel: ecs.boolean,
     modelUrl: ecs.string,
+    ventX: ecs.f32,
+    ventZ: ecs.f32,
     ventHeight: ecs.f32,
+    ventLift: ecs.f32,
     expandAtFullHeat: ecs.f32,
+    formationCount: ecs.ui32,
+    formationMinSize: ecs.f32,
+    formationMaxSize: ecs.f32,
+    formationCrawl: ecs.f32,
+    formationHold: ecs.f32,
     rockCount: ecs.ui32,
     seed: ecs.ui32,
     showVolume: ecs.boolean,
@@ -442,12 +538,19 @@ ecs.registerComponent({
     // number or boolean literal here. An identifier fails to load the component with
     // "expected NumericLiteral, StringLiteral, or BooleanLiteral".
     modelUrl: 'assets/Models/TectonicSeabed.glb',
-    // Where the sculpt's surface is above the vent. `convert_seabed.py` prints this
-    // on every export and it moves when the sculpt does, so it is a parameter rather
-    // than a constant. With a swell on, there are two answers -- 0.094 at rest and
-    // 0.143 fully expanded, on the current sculpt. Sitting between them means the jet
-    // is neither floating when cold nor swallowed when hot.
+    // Where the vent sits in plan, in block units, origin at the centre of the
+    // 100 x 100 mm footprint. This is the mask-weighted centroid of the VentSwell
+    // group measured off the exported model — the middle of the hot band, not the
+    // middle of the block. In millimetres from the corner it is (43.9, 64.0).
+    ventX: -0.061,
+    ventZ: 0.140,
+    // Fallback height, used only in greybox mode or before the model has loaded.
+    // With the sculpt in place the height is read from it every frame instead.
     ventHeight: 0.115,
+    // How far above the sampled surface the pool floats. The surface under the vent
+    // climbs from 0.024 to 0.111 as the plate heats, which is why this is an offset
+    // and not an absolute.
+    ventLift: 0.012,
     // How far the Expand morph is driven at full heat, 0..1 of the 6 mm the
     // converter baked in. 0 turns the swell off without re-exporting anything.
     expandAtFullHeat: 1.0,
@@ -466,6 +569,13 @@ ecs.registerComponent({
     // which a phone shades without noticing; below about 32 the Voronoi cells start
     // to alias into triangles.
     waterSegments: 48,
+    // Platonic solids crystallising out of the hot rock. They spawn where the mask is
+    // strong, crawl down its gradient into colder rock, and set.
+    formationCount: 26,
+    formationMinSize: 0.012,
+    formationMaxSize: 0.038,
+    formationCrawl: 0.055,
+    formationHold: 7,
   },
   data: {
     temperature: ecs.f32,
@@ -482,8 +592,13 @@ ecs.registerComponent({
     const useModel = schema.useModel
     const out: Built = {
       rock: [], glow: [], leds: [], volume: [],
-      pool: 0n, vent: 0n, swarms: [],
+      pool: 0n, swarms: [],
+      ventX: useModel ? schema.ventX : 0,
+      ventZ: useModel ? schema.ventZ : 0,
       ventY: useModel ? schema.ventHeight : SUMMIT_Y,
+      field: null,
+      formations: null,
+      seated: false,
       expand: {meshes: [], index: -1},
       water: null,
       waterWanted: schema.showWater,
@@ -575,19 +690,13 @@ ecs.registerComponent({
       m.b = Math.round(c.b)
     })
 
-    const ventScale = (0.4 + 0.95 * heat) * flicker
-    world.setScale(b.vent, 1, ventScale, 1)
-    world.setPosition(b.vent, 0, SUMMIT_Y + 0.11 * ventScale, 0)
-    ecs.UnlitMaterial.mutate(world, b.vent, (m) => {
-      m.r = Math.round(c.r)
-      m.g = Math.round(c.g)
-      m.b = Math.round(c.b)
-      m.opacity = 0.35 + 0.5 * heat
-    })
+    // The pool breathes with the flicker instead of the jet cone that used to do it.
+    const poolScale = 0.85 + 0.4 * heat * flicker
+    world.setScale(b.pool, poolScale, poolScale * 0.75, poolScale)
 
     b.glow.forEach((g, i) => {
       const phase = 0.5 + 0.5 * Math.sin(data.elapsed * 1.8 + i)
-      ecs.UnlitMaterial.mutate(world, g, (m) => {
+      ecs.UnlitMaterial.mutate(world, g.eid, (m) => {
         m.r = Math.round(c.r)
         m.g = Math.round(c.g)
         m.b = Math.round(c.b)
@@ -597,7 +706,7 @@ ecs.registerComponent({
 
     b.leds.forEach((led, i) => {
       const lit = data.ledLevel * (0.6 + 0.4 * Math.sin(data.elapsed * 6 + i * 1.1))
-      ecs.UnlitMaterial.mutate(world, led, (m) => {
+      ecs.UnlitMaterial.mutate(world, led.eid, (m) => {
         m.r = Math.round(mix(90, 255, clamp01(lit)))
         m.g = Math.round(mix(170, 246, clamp01(lit)))
         m.b = Math.round(mix(210, 255, clamp01(lit)))
@@ -605,15 +714,38 @@ ecs.registerComponent({
       })
     })
 
+    // Once the sculpt has arrived and been sampled, everything that is supposed to
+    // be resting on it gets put where it actually is. The seams and the LEDs only
+    // need doing once; the vent needs doing every frame, because the rock under it
+    // rises by most of its own height as the plate heats.
+    if (b.field) {
+      if (!b.seated) {
+        b.seated = true
+        seatOnTerrain(world, b, rng0(eid))
+        if (schema.formationCount > 0) {
+          b.formations = createFormations(world, eid, b.field, formationOpts(schema),
+            mulberry32(schema.seed * 31 + 5))
+          seedMaterials(world, b.formations)
+        }
+      }
+      b.ventY = heightAt(b.field, b.ventX, b.ventZ, influenceOf(data, schema)) + schema.ventLift
+      world.setPosition(b.pool, b.ventX, b.ventY + 0.012, b.ventZ)
+    }
+
     // Volume expansion. `heat` already carries the eruption burst, so the sculpt
     // swells as the vent is charged and relaxes as it cools — the same single value
     // that drives every other response in here. The mesh list is empty until the GLB
     // finishes downloading, which is why this is a forEach over a possibly empty
     // array rather than a null check.
-    const influence = clamp01(heat * schema.expandAtFullHeat)
+    const influence = influenceOf(data, schema)
     b.expand.meshes.forEach((m) => {
       m.morphTargetInfluences[b.expand.index] = influence
     })
+
+    if (b.formations && b.field) {
+      updateFormations(world, b.formations, dt, heat, influence,
+        drift.get(eid), formationOpts(schema), magmaColour)
+    }
 
     if (b.waterWanted) {
       if (!b.water) {

@@ -2444,7 +2444,15 @@
             "showWater": true,
             "waterLevel": 0.62,
             "waveAmplitude": 0.02,
-            "waterSegments": 48
+            "waterSegments": 48,
+            "ventX": -0.061,
+            "ventZ": 0.14,
+            "ventLift": 0.012,
+            "formationCount": 26,
+            "formationMinSize": 0.012,
+            "formationMaxSize": 0.038,
+            "formationCrawl": 0.055,
+            "formationHold": 7
           }
         }
       },

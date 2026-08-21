@@ -17,6 +17,8 @@ resin work and the 3D work can proceed against something real.
 | Scene | `volcanic-seabed.ts` | Spawns the sculpt, lava seams, LEDs and block wireframe; drives everything from a single 0–1 heat value |
 | Model pipeline | `../../tools/convert_seabed.py` | Turns the sculpted FBX into the GLB the engine loads, and bakes the volume-expansion morph target |
 | Water | `water.ts` | The sliced water volume, its live surface, and the boil over the vent |
+| Terrain | `terrain.ts` | Samples the sculpt so everything else can sit on it instead of guessing |
+| Formations | `formations.ts` | Platonic solids crystallising out of the hot rock and creeping into the cold |
 | Particles | `swarm.ts` | Ash, embers, gas and marine snow |
 | Controls | `seabed-hud.ts` | Cooler / hotter buttons, temperature readout, heat bar |
 | Hardware seam | `tectonic-charge.ts` | Tap-to-charge; fires the eruption and the LED signal, optionally over WebSocket |
@@ -243,6 +245,70 @@ that is invisible; do not use it to carry anything that needs precision.
 `--amount` is the displacement in block units at weight 1, so the default 0.06 is
 6 mm of swell.
 
+## Sitting on the sculpt instead of guessing where it is
+
+Everything that used to float — the vent, the lava seams, the LEDs — floated for one
+reason: the code knew the shape it *wanted* the terrain to be, a cone with a summit
+at a computed height, and the terrain stopped being that shape the moment a sculpt
+replaced it. `terrain.ts` fixes it at the root by sampling the real surface once the
+GLB has loaded, into a 56 x 56 grid of heights and mask weights.
+
+Two heights per cell, not one. The plate swells by up to 140 mm as it heats, so
+"where is the surface" has two answers and the live one is between them — `heightAt`
+takes the morph influence and interpolates, which is *exact*, because the morph is
+itself linear in that influence. Roughly one cell in twelve catches no vertex after
+decimation, so holes are dilated closed from their neighbours; left alone they read
+as pits that anything standing on them falls through.
+
+A grid rather than raycasting: 30,000 vertices splat in once, and every lookup after
+that is four reads and a lerp. Raycasting per formation per frame is the same answer
+for far more work, and would have to be redone every time the swell moved.
+
+**The jet cone is gone.** It belonged to the greybox seamount, where it stood in a
+crater on a summit. On the sculpt there is no summit for it to stand in, so it hung
+in the water attached to nothing. The ash column already says something is venting.
+
+**The vent is not at the centre of the block.** It is at the mask-weighted centroid
+of the VentSwell group, `(-0.061, 0.140)` in block units — `(43.9, 64.0)` in
+millimetres from the corner — because that is the middle of the hot band rather than
+the middle of the block. Its *height* is re-read from the sculpt every frame, since
+the rock under it climbs from 0.024 to 0.111 as the plate heats. `ventX`, `ventZ`
+and `ventLift` are all in the Inspector.
+
+## Mineral formations
+
+The five Platonic solids, crystallising out of the hot rock and setting in the cold.
+They are the vertex mask made legible: each one is born where the mask is strong,
+creeps outward down its gradient, cools as it goes, and freezes. Then it fades and
+another comes up behind it. The temperature slider changes how fast the cycle runs
+and how far each one gets before it sets.
+
+Two things worth writing down.
+
+**`faces: 6` builds nothing.** `ecs.PolyhedronGeometry` covers four of the five —
+measured, `4` gives 12 vertices, `8` gives 24, `12` gives 60, `20` gives 108, and `6`
+gives an empty geometry. The cube is a `BoxGeometry` with equal sides, scaled to the
+cube inscribed in the same sphere so it carries the same visual weight as the others.
+
+**The mask saturates, so the gradient goes flat.** Weight 1 covers about a third of
+the footprint, and inside that plateau the gradient is exactly zero — six of
+twenty-six formations spawned somewhere it mattered. Where the gradient vanishes,
+`maskGradient` falls back to the direction away from the mask centroid, so a
+formation in the middle of the band still has somewhere to go until it reaches the
+edge and the real gradient takes over.
+
+## A trap in the ECS: `object.position` is always zero
+
+The runtime keeps transforms in its own store and composes `object.matrix` from them
+directly. `object.position` on an entity's `Object3D` stays at the origin no matter
+where the entity actually is — so reading a position back off three.js and writing it
+somewhere is a quiet way to move everything to the centre of the block. It cost one
+bug here, in the code that drops the seams and LEDs onto the rock.
+
+Keep the authoritative value yourself, in the component's own state, or read the
+world transform through `world.getWorldTransform(eid, mat)`. `world.setPosition`
+works fine going the other way; it is only the read that lies.
+
 ## The water volume
 
 A section through a body of water rather than a blue lid on top of one: a box the
@@ -376,6 +442,11 @@ Inspector:
 - `rockCount` / `seed` — reroll the boulder field (greybox only; the sculpt is its
   own rock)
 - `showVolume` — the block wireframe
+- `ventX` / `ventZ` / `ventLift` — where the vent sits in plan, and how far the pool
+  floats above whatever height the sculpt has there
+- `formationCount` / `formationMinSize` / `formationMaxSize` — the solids
+- `formationCrawl` — block units per second at full heat
+- `formationHold` — seconds a set formation stays before it is recycled
 - `showWater` — the water volume
 - `waterLevel` — the waterline in block units. The resin block is 0.7 tall, so 0.62
   leaves a little air above the surface rather than filling to the brim
