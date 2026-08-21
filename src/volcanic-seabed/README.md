@@ -11,8 +11,8 @@ and the five Platonic solids crystallise out of the hot band, creep into the col
 and set. Everything runs from one 0–1 heat value, and everything is bound to the
 printed target at true scale.
 
-Still greybox: the ash and ember particles are low-poly stand-ins, and they are the
-one part of these stills that still looks like placeholder geometry.
+The particles are textured, camera-facing sprites now — the last low-poly stand-ins
+are gone.
 
 **At rest** — the slider low, the plate cold, the surface glassy:
 
@@ -36,7 +36,8 @@ the camera-feed background removed. Nothing is composited or retouched.
 | Water | `water.ts` | The sliced water volume, its live surface, and the boil over the vent |
 | Terrain | `terrain.ts` | Samples the sculpt so everything else can sit on it instead of guessing |
 | Formations | `formations.ts` | Platonic solids crystallising out of the hot rock and creeping into the cold |
-| Particles | `swarm.ts` | Ash, embers, gas and marine snow |
+| Particles | `swarm.ts` | Ash, embers, gas and marine snow, as billboarded sprites |
+| Sprites | `../../tools/make_particle_textures.py` | Generates the smoke, ember and bubble textures |
 | Controls | `seabed-hud.ts` | Cooler / hotter buttons, temperature readout, heat bar |
 | Hardware seam | `tectonic-charge.ts` | Tap-to-charge; fires the eruption and the LED signal, optionally over WebSocket |
 | Contract | `events.ts` | The four global events the pieces talk over |
@@ -344,6 +345,55 @@ the middle of the block. Its *height* is re-read from the sculpt every frame, si
 the rock under it climbs from 0.024 to 0.111 as the plate heats. `ventX`, `ventZ`
 and `ventLift` are all in the Inspector.
 
+## Smoke, and where it comes from
+
+The ash used to be `TetrahedronGeometry`. At the size a particle is drawn on a phone
+a tetrahedron is four flat facets and a hard silhouette — it reads as debris however
+it is coloured, and it was the last thing in the scene that looked like placeholder
+geometry. It is a textured quad turned to face the camera now: two triangles instead
+of four, and it reads as smoke at any size.
+
+`tools/make_particle_textures.py` generates the three sprites — smoke, ember, bubble
+— as white images with the shape entirely in the alpha channel, so the swarm can tint
+them from the same magma ramp as everything else. The seed is fixed, so re-running it
+produces byte-identical files rather than churning the repo.
+
+Two things that had to be measured rather than guessed:
+
+- **Noise frequency.** Five octaves from a three-cell base gave five-pixel speckle
+  that looked like sensor noise. Three octaves from two cells gives a few soft lobes,
+  which is what survives being drawn forty pixels across.
+- **Density.** The first texture averaged 0.09 alpha across the quad, so a particle at
+  0.45 material opacity laid down about four percent coverage and the column was
+  invisible over bright water — a solid tetrahedron had been doing ten times that.
+  It averages 0.19 now, at higher opacity.
+
+Billboarding is worked out once per swarm per frame, not once per particle: they all
+share a parent, so they all share the rotation. It is read off `matrixWorld` rather
+than from an Object3D's `quaternion`, for the same reason as everywhere else in this
+project — the runtime composes matrices from its own transform store and the
+decomposed properties are not reliable. One frame of lag on a billboard is invisible.
+Smoke and marine snow also carry a fixed random roll, or every puff in the column is
+the same picture at the same angle and the eye picks it out immediately.
+
+### Several vents, not one
+
+The mask describes a *band* across the plate, not a point, so one chimney in the
+middle of it was the wrong reading of the art. `ventCount` (3 by default) spreads
+emitters along the ridge by farthest-point sampling over the cells the mask calls
+hottest, and each one gets its own pool, its own surface height and its own breathing
+phase — so the plate reads as several independent things venting rather than one
+thing copied.
+
+Two details that cost a round trip each:
+
+- **The first vent is seeded, not searched.** Farthest-point sampling from scratch
+  discards the hand-tuned `ventX`/`ventZ`; seeding the search with it keeps the main
+  vent where it was put and finds the others around it.
+- **Candidates are inset from the rim.** Unconstrained, the sampling walks straight to
+  the corners of the footprint — two of three vents landed at x = ±0.49, half inside
+  the edge of the block with their columns rising outside it.
+
 ## Mineral formations
 
 The five Platonic solids, crystallising out of the hot rock and setting in the cold.
@@ -473,6 +523,68 @@ rotation is what lets the scene be authored the normal way (Y up) and still stan
 up correctly out of the table. If you add your own content, put it under that
 same root and author it Y-up.
 
+## Tracking the resin block itself
+
+`print/IMG_TARGET.jpg` is a top-down photo of the epoxy pour, cut out on white.
+`image-targets/resin-block.*` is the target built from it, registered in
+`src/app.js` alongside the printed base. To rebuild both after a better photograph:
+
+```bash
+python tools/crop_resin_target.py
+python tools/make_image_target.py print/resin-block.jpg resin-block
+```
+
+The first prints the trackability numbers below; the second writes the target.
+
+**The white cutout had to go first.** It is not part of the object: feature
+extraction finds a strong outline there that does not exist when the real block is
+sitting on a table, and the ragged edge of the pour is the least repeatable part of
+it — it catches the light differently from every angle. The crop is found by flooding
+in from the border rather than by thresholding colour, because the top right of this
+pour is pale enough that a plain "is it near white" test ate a third of the interior
+and the largest clean rectangle came out as a 1212 x 180 strip. 88% of each side
+survives.
+
+By the measures the tracker cares about, at the 480 x 640 the engine actually uses:
+
+| | printed base | resin block |
+| --- | --- | --- |
+| contrast (std) | 50.9 | 30.4 |
+| mean gradient | 11.41 | **13.94** |
+| strong-edge pixels | 16.3% | **37.1%** |
+| weakest cell of 36 | 5.8% | **7.8%** |
+| dead cells | 0 | 0 |
+
+So on paper it is the *better* target — the copper flake and the banding give it more
+fine detail, spread more evenly, than the printed sheet. The lower global contrast
+does not matter much; corner and blob features care about local gradient.
+
+**What the numbers cannot tell you is the gloss.** Cured resin is specular, so its
+highlights move with the camera and the light while the features underneath stay
+put. No static measure of the photograph captures that, and it is the thing most
+likely to break tracking in a room with a window or a downlight. Diffuse, even light
+is the whole game here. If it struggles, that is the first variable to change, not
+the target.
+
+### Switching the scene over to it
+
+Three values, and the third is the one that is easy to miss:
+
+1. `src/.expanse.json` — **Volcano Base** object, `imageTarget.name` -> `resin-block`
+2. the same file — **Volcanic Seabed** component, `imageTargetName` -> `resin-block`
+3. **Seabed Root** scale -> about **1.485**
+
+That third one exists because 8th Wall targets are 3:4 portrait and the block is
+square. The builder takes the largest centred 3:4 crop, which is 1750 px of a 2598 px
+photo — so the tracked region spans only 67.4% of the block's width, and the scene is
+authored as *1 unit = the target width = 100 mm*. Left alone, the whole digital layer
+would come up at 67% scale and the claim that it is bound to the object at true size
+would quietly stop being true. 1 / 0.674 = 1.485 puts it back.
+
+Measure the printed crop against the real block before trusting that number: it
+assumes the photo's width is exactly the block's width, which is close but was not
+measured.
+
 ## Printing the target
 
 `print/volcano-base.png` is a generated stand-in for the hand-painted base:
@@ -511,8 +623,9 @@ Inspector:
 - `rockCount` / `seed` — reroll the boulder field (greybox only; the sculpt is its
   own rock)
 - `showVolume` — the block wireframe
-- `ventX` / `ventZ` / `ventLift` — where the vent sits in plan, and how far the pool
-  floats above whatever height the sculpt has there
+- `ventX` / `ventZ` / `ventLift` — where the main vent sits in plan, and how far the
+  pool floats above whatever height the sculpt has there
+- `ventCount` — how many vents to spread along the hot ridge
 - `formationCount` / `formationMinSize` / `formationMaxSize` — the solids
 - `formationCrawl` — block units per second at full heat
 - `formationHold` — seconds a set formation stays before it is recycled

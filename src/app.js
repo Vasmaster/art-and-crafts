@@ -2,6 +2,7 @@ const onxrloaded = () => {
   XR8.XrController.configure({
     imageTargetData: [
       require('../image-targets/volcano-base.json'),
+      require('../image-targets/resin-block.json'),
       require('../image-targets/20_Element_Fire.json'),
       require('../image-targets/22_Element_Air.json'),
       require('../image-targets/23_Element_Water.json'),

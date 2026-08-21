@@ -1,0 +1,24 @@
+{
+  "imagePath": "image-targets/resin-block_luminance.png",
+  "resources": {
+    "originalImage": "resin-block_original.png",
+    "croppedImage": "resin-block_cropped.png",
+    "thumbnailImage": "resin-block_thumbnail.png",
+    "luminanceImage": "resin-block_luminance.png"
+  },
+  "name": "resin-block",
+  "type": "PLANAR",
+  "properties": {
+    "top": 0,
+    "left": 262,
+    "width": 1750,
+    "height": 2333,
+    "isRotated": false,
+    "originalWidth": 2274,
+    "originalHeight": 2333
+  },
+  "loadAutomatically": true,
+  "created": 1787355158999,
+  "updated": 1787355158999,
+  "metadata": null
+}

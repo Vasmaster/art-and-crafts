@@ -219,6 +219,71 @@ export const maskGradient = (f: TerrainField, x: number, z: number): [number, nu
  * that peaks at 1 this converges in a handful of tries, but a mask that was painted
  * mostly dark could otherwise spin.
  */
+/**
+ * Choose `count` vent positions spread along the hot ridge.
+ *
+ * Farthest-point sampling over the cells the mask calls hottest: start at the
+ * strongest cell, then repeatedly take the hot cell furthest from everything chosen
+ * so far. On a mask that saturates across a band — which is what a painted vertex
+ * group looks like — that lands the vents along its length instead of clustering them
+ * all at the centroid, which is what a plain "pick the top N cells" would do.
+ */
+export const pickVents = (
+  f: TerrainField,
+  count: number,
+  seed: {x: number, z: number},
+  minWeight = 0.8,
+  inset = 0.34
+): {x: number, z: number}[] => {
+  const n = f.n
+  const hot: {x: number, z: number, w: number}[] = []
+  for (let k = 0; k < n * n; k++) {
+    const w = f.mask[k]
+    if (w < minWeight) {
+      continue
+    }
+    const x = ((k % n) + 0.5) / n - 0.5
+    const z = (Math.floor(k / n) + 0.5) / n - 0.5
+    // Stay off the rim. Pure farthest-point sampling walks straight to the corners of
+    // the footprint, which put two of three vents half inside the edge of the block
+    // with their columns rising outside it.
+    if (Math.abs(x) > inset || Math.abs(z) > inset) {
+      continue
+    }
+    hot.push({x, z, w})
+  }
+
+  // The first vent is the one that was tuned by hand; the rest are found around it.
+  const chosen = [{x: seed.x, z: seed.z}]
+  if (!hot.length) {
+    return chosen
+  }
+
+  while (chosen.length < Math.max(1, count)) {
+    let best = null
+    let bestScore = -1
+    for (const c of hot) {
+      let d = Infinity
+      for (const q of chosen) {
+        d = Math.min(d, Math.hypot(c.x - q.x, c.z - q.z))
+      }
+      // Distance from the vents already placed, weighted by how hot the cell is:
+      // spread out, but stay on the ridge rather than running to the quietest corner
+      // of the region that happens to clear the threshold.
+      const score = d * c.w
+      if (score > bestScore) {
+        bestScore = score
+        best = c
+      }
+    }
+    if (!best || bestScore < 0.02) {
+      break
+    }
+    chosen.push({x: best.x, z: best.z})
+  }
+  return chosen
+}
+
 export const sampleHotPoint = (
   f: TerrainField,
   rng: () => number,

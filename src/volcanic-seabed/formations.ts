@@ -43,6 +43,14 @@ interface Item {
   spinAxis: number
   spin: number
   angle: number
+  /**
+   * This formation's own hold, not the shared one.
+   *
+   * They all reseed to temp 1 and cool at similar rates, so a single shared hold lets
+   * the whole field re-synchronise after the first cycle and every crystal on the
+   * plate goes dark on the same frame. Scattering the hold keeps them out of step.
+   */
+  hold: number
 }
 
 export interface Formations {
@@ -109,6 +117,7 @@ const reseed = (item: Item, f: TerrainField, rng: () => number, o: FormationOpti
   item.angle = rng() * Math.PI * 2
   item.spinAxis = rng() * Math.PI * 2
   item.spin = (rng() - 0.5) * 1.6
+  item.hold = o.holdTime * (0.45 + 1.1 * rng())
 }
 
 export const createFormations = (
@@ -132,7 +141,7 @@ export const createFormations = (
 
     const item: Item = {
       eid, solid, x: 0, z: 0, size,
-      temp: 1, held: 0, spinAxis: 0, spin: 0, angle: 0,
+      temp: 1, held: 0, spinAxis: 0, spin: 0, angle: 0, hold: o.holdTime,
     }
     reseed(item, field, rng, o)
     // Stagger the starting temperatures so they do not all set on the same frame.
@@ -186,7 +195,7 @@ export const updateFormations = (
       item.angle += item.spin * dt * item.temp
     } else {
       item.held += dt
-      if (item.held > o.holdTime) {
+      if (item.held > item.hold) {
         reseed(item, f.field, rng, o)
       }
     }
@@ -200,7 +209,7 @@ export const updateFormations = (
     // Fade the last of the hold out, so recycling does not pop.
     const fade = item.temp > 0.02
       ? 1
-      : clamp01((o.holdTime - item.held) / Math.max(o.holdTime * 0.25, 0.001))
+      : clamp01((item.hold - item.held) / Math.max(item.hold * 0.25, 0.001))
     world.setScale(item.eid, fade, fade, fade)
 
     // Molten glows, set rock does not. Same ramp as the vent pool, so the whole

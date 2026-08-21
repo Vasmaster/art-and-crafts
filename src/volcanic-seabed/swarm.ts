@@ -15,8 +15,25 @@ export interface SwarmSpec {
   count: number
   /** Base radius of one particle, in block units. */
   radius: number
-  /** Low-poly chunk (ash, embers) or a round bubble. */
-  shape: 'chunk' | 'round'
+  /**
+   * `sprite` is a textured quad turned to face the camera; `chunk` and `round` are
+   * solid low-poly geometry.
+   *
+   * Ash used to be a `chunk`. At the size a particle is drawn on a phone a
+   * tetrahedron is four flat facets and a hard silhouette — it reads as debris
+   * however it is coloured, and it was the last part of the scene that still looked
+   * like placeholder geometry. A sprite reads as smoke at any size and costs two
+   * triangles instead of four.
+   */
+  shape: 'chunk' | 'round' | 'sprite'
+  /** Sprite only: URL of the texture, white with the shape in its alpha. */
+  texture?: string
+  /**
+   * Sprite only: give each particle a fixed random roll about the view axis. Without
+   * it every puff in the column is the same picture at the same angle, and the eye
+   * picks the repetition out immediately.
+   */
+  roll?: boolean
   /** Fraction of the pool that is allowed to live, given the current heat. */
   density: (heat: number) => number
   spawn: (rng: () => number, heat: number) => {
@@ -37,6 +54,8 @@ export interface SwarmSpec {
 
 export interface Swarm {
   spec: SwarmSpec
+  /** Kept so the billboard rotation can be worked out in this entity's space. */
+  parent: ecs.Eid
   eids: ecs.Eid[]
   p: number[]      // flat xyz
   v: number[]      // flat xyz
@@ -52,7 +71,7 @@ export const createSwarm = (
   rng: () => number
 ): Swarm => {
   const swarm: Swarm = {
-    spec, eids: [], p: [], v: [], age: [], span: [], phase: [],
+    spec, parent, eids: [], p: [], v: [], age: [], span: [], phase: [],
   }
 
   for (let i = 0; i < spec.count; i++) {
@@ -60,12 +79,27 @@ export const createSwarm = (
     world.setParent(e, parent)
     world.setPosition(e, 0, 0, 0)
     world.setScale(e, 0, 0, 0)
-    if (spec.shape === 'round') {
+    if (spec.shape === 'sprite') {
+      ecs.PlaneGeometry.set(world, e, {width: spec.radius * 2, height: spec.radius * 2})
+    } else if (spec.shape === 'round') {
       ecs.SphereGeometry.set(world, e, {radius: spec.radius})
     } else {
       ecs.TetrahedronGeometry.set(world, e, {radius: spec.radius})
     }
-    ecs.UnlitMaterial.set(world, e, {r: 255, g: 255, b: 255, opacity: 0, forceTransparent: true})
+    ecs.UnlitMaterial.set(world, e, {
+      r: 255,
+      g: 255,
+      b: 255,
+      opacity: 0,
+      forceTransparent: true,
+      ...(spec.shape === 'sprite' ? {
+        textureSrc: spec.texture,
+        // A cloud of sprites has no meaningful front-to-back order, and writing depth
+        // would make each one punch a hole in the ones behind it.
+        depthWrite: false,
+        side: 'double',
+      } : {}),
+    })
     swarm.eids.push(e)
     swarm.p.push(0, 0, 0)
     swarm.v.push(0, 0, 0)
@@ -90,6 +124,50 @@ const respawn = (swarm: Swarm, i: number, rng: () => number, heat: number) => {
   swarm.span[i] = span
 }
 
+// Scratch objects, allocated once. A particle update runs a few hundred times a
+// frame and three.js maths types are not free to construct.
+let scratch: any = null
+
+const ensureScratch = () => {
+  const THREE = (window as any).THREE
+  if (!THREE) {
+    return null
+  }
+  if (!scratch) {
+    scratch = {
+      qCam: new THREE.Quaternion(),
+      qHost: new THREE.Quaternion(),
+      qRoll: new THREE.Quaternion(),
+      qOut: new THREE.Quaternion(),
+      forward: new THREE.Vector3(0, 0, 1),
+    }
+  }
+  return scratch
+}
+
+/**
+ * Rotation that turns a particle to face the camera, expressed in the parent's space.
+ *
+ * Every particle in a swarm shares a parent, so this is the same quaternion for all
+ * of them and is worked out once per swarm per frame rather than once per particle.
+ *
+ * Read from `matrixWorld` rather than asking for the world quaternion: the runtime
+ * keeps its transforms in its own store and composes matrices from them, so the
+ * decomposed `quaternion` property of an Object3D is not reliable. One frame of lag
+ * on a billboard is invisible.
+ */
+const billboardRotation = (world, parent: ecs.Eid) => {
+  const sc = ensureScratch()
+  const cam = world.three?.activeCamera
+  const host = world.three?.entityToObject?.get(parent)
+  if (!sc || !cam || !host) {
+    return null
+  }
+  sc.qCam.setFromRotationMatrix(cam.matrixWorld)
+  sc.qHost.setFromRotationMatrix(host.matrixWorld)
+  return sc.qHost.invert().multiply(sc.qCam)
+}
+
 export const updateSwarm = (
   world,
   swarm: Swarm,
@@ -98,6 +176,7 @@ export const updateSwarm = (
   rng: () => number
 ) => {
   const {spec} = swarm
+  const bill = spec.shape === 'sprite' ? billboardRotation(world, swarm.parent) : null
   const live = Math.round(spec.count * spec.density(heat))
   const [ax, ay, az] = spec.accel
   const keep = spec.drag ** dt
@@ -138,6 +217,16 @@ export const updateSwarm = (
     world.setPosition(eid, x, swarm.p[j + 1], z)
     const s = spec.growth(age)
     world.setScale(eid, s, s, s)
+
+    if (bill) {
+      if (spec.roll) {
+        scratch.qRoll.setFromAxisAngle(scratch.forward, swarm.phase[i])
+        scratch.qOut.copy(bill).multiply(scratch.qRoll)
+        world.setQuaternion(eid, scratch.qOut.x, scratch.qOut.y, scratch.qOut.z, scratch.qOut.w)
+      } else {
+        world.setQuaternion(eid, bill.x, bill.y, bill.z, bill.w)
+      }
+    }
 
     const [r, g, b, o] = spec.colour(age, heat)
     ecs.UnlitMaterial.mutate(world, eid, (m) => {

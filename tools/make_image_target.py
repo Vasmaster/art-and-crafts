@@ -38,6 +38,12 @@ LUMINANCE_SIZE = (480, 640)
 THUMBNAIL_HEIGHT = 350
 ASPECT = 3.0 / 4.0
 
+# The engine only ever loads the luminance image. `_original` and `_cropped` are
+# previews for the editor, and every file in image-targets/ is copied into the deploy
+# whether it is used or not -- a 2600 px phone photo lands as a 5.6 MB PNG that
+# nothing downloads on purpose. Cap them.
+PREVIEW_MAX = 800
+
 
 def centre_crop_3x4(img):
     """Largest centred 3:4 portrait rectangle. Returns (crop, (left, top, w, h))."""
@@ -53,6 +59,15 @@ def centre_crop_3x4(img):
     left = (w - cw) // 2
     top = (h - ch) // 2
     return img.crop((left, top, left + cw, top + ch)), (left, top, cw, ch)
+
+
+def shrink(img, longest):
+    """Downscale so the longer side is at most `longest`, keeping the aspect."""
+    w, h = img.size
+    if max(w, h) <= longest:
+        return img
+    k = longest / max(w, h)
+    return img.resize((max(1, round(w * k)), max(1, round(h * k))), Image.LANCZOS)
 
 
 def build(source_path, name, crop=True):
@@ -74,8 +89,8 @@ def build(source_path, name, crop=True):
     thumbnail = cropped.resize((thumb_w, THUMBNAIL_HEIGHT), Image.LANCZOS)
 
     out = {
-        'original': src,
-        'cropped': cropped,
+        'original': shrink(src, PREVIEW_MAX),
+        'cropped': shrink(cropped, PREVIEW_MAX),
         'luminance': luminance,
         'thumbnail': thumbnail,
     }
