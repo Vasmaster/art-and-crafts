@@ -4,11 +4,28 @@ A working proof of concept for the first of the three phygital blocks in the
 project plan: a hand-made resin block whose WebAR layer shows the magma, ash and
 heat the resin can only hint at.
 
-Nothing here is final art. It is a greybox that proves the pipeline end to end —
-image target, block-aligned volume, interactive variable, hardware seam — so the
-resin work and the 3D work can proceed against something real.
+It is no longer a greybox. The seabed is the sculpt, with its own baked colour and
+normal maps; it swells on its vertex normals as the plate heats; a sliced water
+volume sits on top of it with a live surface that boils where the rock is hottest;
+and the five Platonic solids crystallise out of the hot band, creep into the cold,
+and set. Everything runs from one 0–1 heat value, and everything is bound to the
+printed target at true scale.
+
+Still greybox: the ash and ember particles are low-poly stand-ins, and they are the
+one part of these stills that still looks like placeholder geometry.
+
+**At rest** — the slider low, the plate cold, the surface glassy:
+
+![At rest](../../docs/preview-calm.png)
+
+**Erupting** — the slider at the top and the vent freshly charged. The plate has
+risen, the vent pool is white-hot, formations are glowing where they have just come
+up, and the water is boiling above the vent:
 
 ![Erupting](../../docs/preview-erupting.png)
+
+Both are rendered from the running scene at the two ends of the same slider, with
+the camera-feed background removed. Nothing is composited or retouched.
 
 ## What runs
 
