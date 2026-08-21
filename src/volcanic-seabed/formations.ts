@@ -58,6 +58,11 @@ export interface FormationOptions {
   crawlSpeed: number
   /** How long a set formation stays before being recycled, in seconds. */
   holdTime: number
+  /**
+   * Temperature lost per second out on cold rock with the plate cold — the fastest
+   * case. Everything else is this scaled down by the shelter term below.
+   */
+  coolRate: number
 }
 
 /** Quaternion about an axis in the XZ plane, tilted, so they tumble rather than spin flat. */
@@ -167,11 +172,16 @@ export const updateFormations = (
       item.x = Math.max(-0.47, Math.min(0.47, item.x))
       item.z = Math.max(-0.47, Math.min(0.47, item.z))
 
-      // Cooling: fast out on the cold rock, slow while it is still over the ridge,
-      // and slower still when the whole plate is hot. This is what makes the slider
+      // Cooling: fast out on the cold rock, slower while it is still over the ridge,
+      // slower again when the whole plate is hot. This is what makes the slider
       // change how far they get before they set.
-      const shelter = mix(1.0, 0.25, hot) * mix(1.0, 0.45, heat)
-      item.temp = Math.max(0, item.temp - dt * 0.16 * shelter)
+      //
+      // The shelter floor matters more than the rate. At 0.25 * 0.45 a formation
+      // sitting on the hot band with the slider at full took the better part of a
+      // minute to set, which is not a cycle anyone watches to the end. Nothing here
+      // outlasts about ten seconds now.
+      const shelter = mix(1.0, 0.45, hot) * mix(1.0, 0.6, heat)
+      item.temp = Math.max(0, item.temp - dt * o.coolRate * shelter)
 
       item.angle += item.spin * dt * item.temp
     } else {

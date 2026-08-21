@@ -245,6 +245,58 @@ that is invisible; do not use it to carry anything that needs precision.
 `--amount` is the displacement in block units at weight 1, so the default 0.06 is
 6 mm of swell.
 
+## The eruption envelope
+
+Charging the vent used to be a step function: the tap put the whole burst on in a
+single frame, which showed up as the readout jumping 438 degrees at once and the
+seabed snapping to full swell before it had visibly begun. Now the burst has an
+attack, a hold and a release — `burstRise`, `burstHoldTime`, `burstFall`.
+
+Measured over a simulated tap at 60 fps:
+
+| | before | after |
+| --- | --- | --- |
+| largest single-frame change | 438 C | 6 C |
+| seconds above 0.6 heat | 1.82 | 4.22 |
+| seconds above 0.8 heat | 0.60 | 2.50 |
+| peak | 1118 C | 1120 C |
+
+The peak is deliberately unchanged — the tap is worth the same amount of heat, it
+just takes 1.4 seconds to get there and stays at the top for 1.6 before the old decay
+takes over. `burstPeak` doubles as the phase marker: non-zero means still climbing or
+holding, zero means falling, which keeps the whole envelope inside two floats of the
+component's `data` schema.
+
+The rise is specified in seconds-to-peak rather than units-per-second on purpose. A
+second tap part-way through should not take longer just because the vent is already
+warm — it raises the ceiling, refreshes the hold, and still arrives at the top on
+time.
+
+## The water surface highlight
+
+Two additions that both exist to answer the same question — *where is the top of the
+water* — from the two directions you can look at the block from.
+
+**Looking down**, a specular highlight on the surface: a broad sheen for direction
+and a tight glint that catches the faces of waves as they turn. Both are computed in
+**object space**, against a light fixed above the block. A view-space light is a head
+torch: the glints slide around as the phone moves and the water reads as wet plastic.
+The block does not move relative to the printed target, so a light fixed in its space
+stays put the way a window does.
+
+That the glints exist at all depends on the wave normal genuinely tilting, which it
+does — up to about 25 degrees at the steepest, from the finite difference already
+being computed for the shading.
+
+**Looking from the side**, a bright meniscus a few millimetres thick where the
+waterline crosses each cut face. It follows the wave down, and it is masked to the
+walls only, because a cut through water is not a surface and should not reflect
+anything. `vTop` separates the two, read off the *undisplaced* box normal before the
+wave overwrites it — the only clean way to tell them apart, since the top row of a
+wall shares its position with the surface.
+
+`waterSpecular` and `waterLineWidth` are both in the Inspector; 0 turns either off.
+
 ## Sitting on the sculpt instead of guessing where it is
 
 Everything that used to float — the vent, the lava seams, the LEDs — floated for one
@@ -447,6 +499,12 @@ Inspector:
 - `formationCount` / `formationMinSize` / `formationMaxSize` — the solids
 - `formationCrawl` — block units per second at full heat
 - `formationHold` — seconds a set formation stays before it is recycled
+- `formationCool` — temperature lost per second in the coldest case. At 0.45 nothing
+  outlasts about ten seconds; the old 0.16 let one shelter on the hot band for the
+  better part of a minute
+- `burstRise` / `burstHoldTime` / `burstFall` — the eruption envelope, in seconds and
+  units per second
+- `waterSpecular` / `waterLineWidth` — the surface highlight and the waterline
 - `showWater` — the water volume
 - `waterLevel` — the waterline in block units. The resin block is 0.7 tall, so 0.62
   leaves a little air above the surface rather than filling to the brim

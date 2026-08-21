@@ -39,6 +39,8 @@ export interface WaterOptions {
   amplitude: number     // wave height at full calm, block units
   segments: number      // grid resolution across the surface
   depthSegments: number // rows down the cut walls
+  specular: number      // strength of the highlight on the surface, 0 turns it off
+  lineWidth: number     // thickness of the waterline on the cut faces, block units
 }
 
 export interface Water {
@@ -58,6 +60,9 @@ varying float vCrest;      // signed surface height, for foam
 varying float vBoil;
 varying vec3  vViewDir;
 varying vec3  vNrm;
+varying float vTop;        // 1 on the surface, 0 on the cut walls
+varying float vBelow;      // distance below the waterline, block units
+varying vec3  vNrmObj;     // wave normal in object space, for the highlight
 
 // --- cheap hashes -----------------------------------------------------------
 vec2 hash22(vec2 p) {
@@ -104,6 +109,12 @@ float ventWeight(vec2 xz) {
 void main() {
   vec3 p = position;
 
+  // Which face this vertex came from, read off the *undisplaced* normal before the
+  // wave overwrites it. The box has one normal per face, so this is 1 across the
+  // whole top and 0 down every wall — the only clean way to tell the surface from
+  // the section, since the top row of a wall shares its position with the surface.
+  vTop = smoothstep(0.55, 0.95, normal.y);
+
   // 1 at the waterline, easing to 0 with depth. Squared so the top centimetre
   // carries almost all of the motion and the volume below it stays legible.
   float m = clamp(p.y / max(uLevel, 1e-4), 0.0, 1.0);
@@ -125,8 +136,17 @@ void main() {
     -(hz - h) * uAmp * m
   ));
   vNrm = normalize(normalMatrix * mix(normal, nrm, m));
+  // Kept in object space as well. The highlight has to be computed here rather than
+  // in view space: a view-space light is a head torch, so the glints slide around as
+  // the phone moves and the water reads as plastic. The block does not move relative
+  // to the printed target, so a light fixed in its space stays put like a window
+  // does.
+  vNrmObj = mix(normal, nrm, m);
 
   vDepth = 1.0 - clamp(p.y / max(uLevel, 1e-4), 0.0, 1.0);
+  // Absolute rather than normalised, so the waterline drawn on the cut faces is a
+  // fixed few millimetres thick however deep the water is set.
+  vBelow = uLevel - p.y;
   vCrest = h;
   vBoil = uHeat * vent;
 
@@ -145,12 +165,17 @@ uniform vec3  uFoam;
 uniform vec3  uHot;
 uniform float uOpacity;
 uniform float uHeat;
+uniform float uSpecular;
+uniform float uLineWidth;
 
 varying float vDepth;
 varying float vCrest;
 varying float vBoil;
 varying vec3  vViewDir;
 varying vec3  vNrm;
+varying float vTop;
+varying float vBelow;
+varying vec3  vNrmObj;
 
 void main() {
   // Thicker water is darker and denser. This is the whole reason the volume is
@@ -166,14 +191,41 @@ void main() {
   float foam = clamp(crest * (1.0 - vDepth) + vBoil * crest * 1.4, 0.0, 1.0);
   col = mix(col, uFoam, foam * 0.8);
 
+  vec3 N = normalize(vNrm);
+  vec3 V = normalize(vViewDir);
+
   // Glancing angles read as denser water, which is what sells it as a solid
   // volume rather than a blue pane.
-  float fres = pow(1.0 - abs(dot(normalize(vNrm), normalize(vViewDir))), 2.5);
+  float fres = pow(1.0 - abs(dot(N, V)), 2.5);
+
+  // Specular off the surface, worked out in object space against a light fixed above
+  // the block. Two lobes: a broad sheen that gives the whole top a direction, and a
+  // tight glint that catches the faces of waves as they turn towards the light. That
+  // second term is the one that reads as water, and it only exists because the wave
+  // normal genuinely tilts -- roughly 25 degrees at the steepest, which is plenty.
+  //
+  // Restricted to the top face: a wall is a cut through the water, and a cut does not
+  // reflect anything.
+  vec3 No = normalize(vNrmObj);
+  vec3 Ho = normalize(normalize(vec3(0.45, 0.90, 0.32)) + vec3(0.0, 1.0, 0.0));
+  float nh = max(dot(No, Ho), 0.0);
+  float sheen = pow(nh, 6.0) * 0.22;
+  float glint = pow(nh, 34.0) * 0.85;
+  float spec = (sheen + glint) * vTop * uSpecular;
+  col += vec3(0.82, 0.93, 1.0) * spec;
+
+  // The waterline itself, drawn on the cut faces only: a bright meniscus a few
+  // millimetres thick that follows the wave down. Without it the section just fades
+  // out at the top and there is no line to point at and call the water level.
+  float line = (1.0 - smoothstep(0.0, uLineWidth, max(vBelow, 0.0))) * (1.0 - vTop);
+  col = mix(col, vec3(0.86, 0.96, 1.0), line * 0.8);
 
   float a = uOpacity;
   a += vDepth * 0.30;                 // the column beneath is more opaque
   a += fres * 0.35;
   a += foam * 0.45;
+  a += spec * 0.6;
+  a += line * 0.7;
   a = clamp(a, 0.0, 0.96);
 
   gl_FragColor = vec4(col, a);
@@ -230,6 +282,8 @@ export const createWater = (world, parent: ecs.Eid, o: WaterOptions): Water | nu
     uFoam: {value: new THREE.Color(0.88, 0.96, 1.0)},
     uHot: {value: new THREE.Color(0.95, 0.42, 0.16)},
     uOpacity: {value: 0.16},
+    uSpecular: {value: o.specular},
+    uLineWidth: {value: o.lineWidth},
   }
 
   const mat = new THREE.ShaderMaterial({

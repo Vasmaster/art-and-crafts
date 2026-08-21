@@ -2452,7 +2452,13 @@
             "formationMinSize": 0.012,
             "formationMaxSize": 0.038,
             "formationCrawl": 0.055,
-            "formationHold": 7
+            "formationHold": 7,
+            "formationCool": 0.45,
+            "burstRise": 1.4,
+            "burstHoldTime": 1.6,
+            "burstFall": 0.3,
+            "waterSpecular": 1,
+            "waterLineWidth": 0.006
           }
         }
       },

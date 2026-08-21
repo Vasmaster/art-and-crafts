@@ -2,7 +2,7 @@ import * as ecs from '@8thwall/ecs'
 
 import {CHARGE, ERUPT, LEDS, SET_TEMPERATURE, STATE} from './events'
 import {Swarm, createSwarm, updateSwarm} from './swarm'
-import {Water, createWater, disposeWater, updateWater} from './water'
+import {Water, WaterOptions, createWater, disposeWater, updateWater} from './water'
 import {Formations, createFormations, seedMaterials, updateFormations} from './formations'
 import {TerrainField, buildTerrainField, heightAt} from './terrain'
 
@@ -128,8 +128,7 @@ interface Built {
    */
   water: Water | null
   waterWanted: boolean
-  waterOptions: {level: number, width: number, amplitude: number,
-    segments: number, depthSegments: number}
+  waterOptions: WaterOptions
 }
 
 const built = new Map<ecs.Eid, Built>()
@@ -478,12 +477,40 @@ const seatOnTerrain = (world, b: Built, rng: () => number) => {
   b.leds.forEach(l => seat(l, -0.012))
 }
 
+/**
+ * Attack, hold, release for the eruption.
+ *
+ * `burstPeak` doubles as the phase: non-zero means the envelope is still climbing or
+ * holding, zero means it is falling. Two floats of state rather than an enum, which
+ * keeps it inside the component's `data` schema where the engine can serialise it.
+ *
+ * The rise is in seconds-to-peak rather than units-per-second on purpose. Tapping
+ * again part-way through should not take longer just because the vent is already
+ * warm — it should reach the top at the same moment either way.
+ */
+const advanceBurst = (data, schema, dt: number) => {
+  if (data.burstPeak > 0) {
+    if (data.burst < data.burstPeak) {
+      const rate = data.burstPeak / Math.max(schema.burstRise, 0.05)
+      data.burst = Math.min(data.burstPeak, data.burst + dt * rate)
+      return
+    }
+    data.burstHold -= dt
+    if (data.burstHold <= 0) {
+      data.burstPeak = 0
+    }
+    return
+  }
+  data.burst = Math.max(0, data.burst - dt * schema.burstFall)
+}
+
 const formationOpts = (schema) => ({
   count: schema.formationCount,
   minSize: schema.formationMinSize,
   maxSize: schema.formationMaxSize,
   crawlSpeed: schema.formationCrawl,
   holdTime: schema.formationHold,
+  coolRate: schema.formationCool,
 })
 
 const influenceOf = (data, schema) =>
@@ -515,11 +542,15 @@ ecs.registerComponent({
     ventHeight: ecs.f32,
     ventLift: ecs.f32,
     expandAtFullHeat: ecs.f32,
+    burstRise: ecs.f32,
+    burstHoldTime: ecs.f32,
+    burstFall: ecs.f32,
     formationCount: ecs.ui32,
     formationMinSize: ecs.f32,
     formationMaxSize: ecs.f32,
     formationCrawl: ecs.f32,
     formationHold: ecs.f32,
+    formationCool: ecs.f32,
     rockCount: ecs.ui32,
     seed: ecs.ui32,
     showVolume: ecs.boolean,
@@ -528,6 +559,8 @@ ecs.registerComponent({
     waterLevel: ecs.f32,
     waveAmplitude: ecs.f32,
     waterSegments: ecs.ui32,
+    waterSpecular: ecs.f32,
+    waterLineWidth: ecs.f32,
   },
   schemaDefaults: {
     imageTargetName: 'volcano-base',
@@ -554,6 +587,14 @@ ecs.registerComponent({
     // How far the Expand morph is driven at full heat, 0..1 of the 6 mm the
     // converter baked in. 0 turns the swell off without re-exporting anything.
     expandAtFullHeat: 1.0,
+    // The eruption envelope. It used to be a step: the tap put the whole burst on in
+    // one frame, which showed up as the readout jumping 400 degrees and the seabed
+    // snapping to full swell before it had visibly started. Now it climbs, holds at
+    // the top for about as long as the old one spent above half, and then falls at
+    // the rate it always did.
+    burstRise: 1.4,        // seconds from wherever it is to the peak
+    burstHoldTime: 1.6,    // seconds at the peak
+    burstFall: 0.3,        // units per second on the way down
     rockCount: 34,
     seed: 7,
     showVolume: true,
@@ -569,6 +610,13 @@ ecs.registerComponent({
     // which a phone shades without noticing; below about 32 the Voronoi cells start
     // to alias into triangles.
     waterSegments: 48,
+    // Strength of the highlight on the water surface. It is worked out against a
+    // light fixed above the block rather than one fixed to the camera, so the glints
+    // stay put as the phone moves instead of sliding around like wet plastic.
+    waterSpecular: 1.0,
+    // Thickness of the waterline drawn on the cut faces, block units. 6 mm on a
+    // 100 mm block: enough to read across a room, thin enough to still be a line.
+    waterLineWidth: 0.006,
     // Platonic solids crystallising out of the hot rock. They spawn where the mask is
     // strong, crawl down its gradient into colder rock, and set.
     formationCount: 26,
@@ -576,11 +624,17 @@ ecs.registerComponent({
     formationMaxSize: 0.038,
     formationCrawl: 0.055,
     formationHold: 7,
+    // Temperature lost per second in the coldest case. At 0.45 a formation out on
+    // cold rock sets in a couple of seconds, and one sheltering on the hot band with
+    // the slider at full still sets inside about ten.
+    formationCool: 0.45,
   },
   data: {
     temperature: ecs.f32,
     target: ecs.f32,
     burst: ecs.f32,
+    burstPeak: ecs.f32,
+    burstHold: ecs.f32,
     elapsed: ecs.f32,
     ledLevel: ecs.f32,
     tracked: ecs.boolean,
@@ -608,6 +662,8 @@ ecs.registerComponent({
         amplitude: schema.waveAmplitude,
         segments: schema.waterSegments,
         depthSegments: 6,
+        specular: schema.waterSpecular,
+        lineWidth: schema.waterLineWidth,
       },
     }
 
@@ -647,6 +703,8 @@ ecs.registerComponent({
     data.temperature = schema.startTemperature
     data.target = schema.startTemperature
     data.burst = 0
+    data.burstPeak = 0
+    data.burstHold = 0
     data.elapsed = 0
     data.ledLevel = 0
     data.tracked = !schema.hideUntilFound
@@ -677,7 +735,7 @@ ecs.registerComponent({
     // Ease toward the requested temperature so the slider feels like heating rock
     // rather than flipping a switch.
     data.temperature += (data.target - data.temperature) * Math.min(1, dt * 2.2)
-    data.burst = Math.max(0, data.burst - dt * 0.3)
+    advanceBurst(data, schema, dt)
 
     const heat = clamp01(data.temperature + data.burst * 0.55)
     const pulse = 0.5 + 0.5 * Math.sin(data.elapsed * 2.6)
@@ -762,7 +820,7 @@ ecs.registerComponent({
     world.events.dispatch(world.events.globalId, STATE, {
       temperature: data.temperature,
       celsius: Math.round(mix(TEMP_MIN_C, TEMP_MAX_C, heat)),
-      erupting: data.burst > 0.05,
+      erupting: data.burst > 0.05 || data.burstPeak > 0,
       tracked: data.tracked,
     })
   },
@@ -773,8 +831,13 @@ ecs.registerComponent({
         dataAttribute.cursor(eid).target = clamp01((e.data as any).value)
       })
       .listen(world.events.globalId, ERUPT, (e) => {
-        const power = (e.data as any)?.power ?? 1
-        dataAttribute.cursor(eid).burst = clamp01(power)
+        const power = clamp01((e.data as any)?.power ?? 1)
+        const cursor = dataAttribute.cursor(eid)
+        // Re-arm rather than restart: a second tap while the first is still climbing
+        // raises the ceiling and refreshes the hold, it does not knock the level back
+        // down to wherever the new tap would have started from.
+        cursor.burstPeak = Math.max(cursor.burstPeak, power)
+        cursor.burstHold = schemaAttribute.get(eid).burstHoldTime
       })
       .listen(world.events.globalId, LEDS, (e) => {
         const {on, intensity} = e.data as any
